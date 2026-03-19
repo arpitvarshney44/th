@@ -48,7 +48,7 @@ exports.sendOTP = async (identifier, channel = 'sms') => {
     await sendViaSMS(identifier, otp);
   }
 
-  return { otpId, message: 'OTP sent successfully.' };
+  return { otpId, message: 'OTP sent successfully.', otp };
 };
 
 exports.verifyOTP = async (identifier, otp, otpId) => {
