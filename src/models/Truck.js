@@ -10,6 +10,7 @@ const truckSchema = new mongoose.Schema(
       required: true,
     },
     capacity: { type: Number, required: true }, // in tonnes
+    length: { type: String, trim: true }, // e.g., '14ft', '17ft', '32ft'
     model: { type: String, required: true },
     year: { type: Number },
     rcImage: { type: String },

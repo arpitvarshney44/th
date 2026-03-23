@@ -59,7 +59,7 @@ exports.updateLocation = async (req, res, next) => {
 // POST /driver/trucks
 exports.addTruck = async (req, res, next) => {
   try {
-    const { registrationNumber, type, capacity, model, year } = req.body;
+    const { registrationNumber, type, capacity, model, year, length } = req.body;
     const truck = await Truck.create({
       owner: req.user._id,
       registrationNumber,
@@ -67,6 +67,7 @@ exports.addTruck = async (req, res, next) => {
       capacity,
       model,
       year,
+      length,
     });
     res.status(201).json({ success: true, data: truck });
   } catch (err) { next(err); }
