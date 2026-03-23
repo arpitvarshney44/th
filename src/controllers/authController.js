@@ -21,7 +21,7 @@ exports.sendOTP = async (req, res, next) => {
 // POST /auth/verify-otp  — verify SMS OTP, login or flag new user
 exports.verifyOTP = async (req, res, next) => {
   try {
-    const { phone, otp, otpId } = req.body;
+    const { phone, otp, otpId, appType } = req.body; // Add appType
     if (!phone || !otp || !otpId) {
       return res.status(400).json({ success: false, message: 'phone, otp, and otpId are required.' });
     }
@@ -29,12 +29,24 @@ exports.verifyOTP = async (req, res, next) => {
     const result = await otpService.verifyOTP(phone, otp, otpId);
     if (!result.valid) return res.status(400).json({ success: false, message: result.message });
 
+    // Find user (exclude admins)
     let user = await User.findOne({ phone, role: { $ne: 'admin' } });
     const isNewUser = !user;
 
     if (!user) {
-      // Create a minimal user record — profile will be completed later
-      user = await User.create({ phone, role: 'driver' });
+      // Create user with correct role based on appType
+      const role = appType === 'transporter' ? 'transporter' : 'driver';
+      user = await User.create({ phone, role });
+    } else if (appType === 'transporter' && user.role !== 'transporter') {
+      // If an existing driver logs into transporter app, update role or handle it
+      // For now, we'll allow it and maybe update role or just let them login if business logic allows.
+      // Easiest is to update the role or add a secondary role, but schema has single role.
+      // Assuming they can switch, or we just trust the existing role. 
+      // Let's ensure role is Transporter if they are using Transporter app and they are new to it.
+      if(user.role === 'driver' && user.companyName === undefined) {
+         user.role = 'transporter';
+         await user.save();
+      }
     }
 
     if (user.isBlocked) {
@@ -52,6 +64,7 @@ exports.verifyOTP = async (req, res, next) => {
     });
   } catch (err) { next(err); }
 };
+
 
 // POST /auth/resend-otp  — resend SMS OTP
 exports.resendOTP = async (req, res, next) => {
