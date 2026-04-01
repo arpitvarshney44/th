@@ -23,5 +23,8 @@ router.post('/documents', upload.fields([
 ]), ctrl.uploadDocuments);
 router.get('/trips/active', ctrl.getActiveTrip);
 router.get('/trips/history', ctrl.getTripHistory);
+router.get('/bids', ctrl.getMyBids);
+router.get('/bids/:loadId', ctrl.getBidForLoad);
+router.delete('/bids/:bidId', ctrl.withdrawBid);
 
 module.exports = router;

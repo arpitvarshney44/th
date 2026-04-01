@@ -56,7 +56,9 @@ app.use('/api/v1/driver', driverRoutes);
 app.use('/api/v1/loads', loadRoutes);
 app.use('/api/v1/trips', tripRoutes);
 app.use('/api/v1/wallet', walletRoutes);
+app.use('/api/v1/notifications', require('./routes/notifications'));
 app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1/payments', require('./routes/payments'));
 
 // Transporter profile
 app.use('/api/v1/transporter', require('./routes/transporter'));

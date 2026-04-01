@@ -4,6 +4,8 @@ const User = require('../models/User');
 const Rating = require('../models/Rating');
 const walletService = require('../services/walletService');
 const notificationService = require('../services/notificationService');
+const paymentController = require('./paymentController');
+const logger = require('../config/logger');
 
 // PATCH /trips/:id/start
 exports.startTrip = async (req, res, next) => {
@@ -23,6 +25,13 @@ exports.startTrip = async (req, res, next) => {
       data: { tripId: trip._id.toString() },
       fcmToken: transporter?.fcmToken,
     });
+
+    // Process 90% loading payout if payment was captured
+    try {
+      await paymentController.processLoadingPayout(trip._id);
+    } catch (err) {
+      logger.error('Loading payout failed (non-blocking):', err.message);
+    }
 
     res.json({ success: true, message: 'Trip started.' });
   } catch (err) { next(err); }
@@ -70,14 +79,22 @@ exports.completeTrip = async (req, res, next) => {
     });
     await Load.findByIdAndUpdate(trip.load, { status: 'delivered' });
 
-    // Credit driver wallet
-    await walletService.credit(
-      trip.driver,
-      trip.driverEarnings,
-      `Trip earnings - Load delivered`,
-      'trip_earning',
-      trip._id,
-    );
+    // Process 10% delivery payout if loading payout was done
+    try {
+      await paymentController.processDeliveryPayout(trip._id);
+    } catch (err) {
+      logger.error('Delivery payout failed (non-blocking):', err.message);
+      // Fallback: credit full earnings to wallet if payout system wasn't used
+      if (trip.payoutStage === 'none') {
+        await walletService.credit(
+          trip.driver,
+          trip.driverEarnings,
+          `Trip earnings - Load delivered`,
+          'trip_earning',
+          trip._id,
+        );
+      }
+    }
 
     // Update driver stats
     await User.findByIdAndUpdate(trip.driver, { $inc: { totalTrips: 1 } });

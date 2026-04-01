@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const Truck = require('../models/Truck');
 const Trip = require('../models/Trip');
+const Bid = require('../models/Bid');
 const Transaction = require('../models/Transaction');
 const { fileUrl } = require('../middleware/upload');
 
@@ -138,5 +139,60 @@ exports.getActiveTrip = async (req, res, next) => {
       .populate('transporter', 'name companyName phone rating');
 
     res.json({ success: true, data: trip });
+  } catch (err) { next(err); }
+};
+
+// GET /driver/bids
+exports.getMyBids = async (req, res, next) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const skip = (page - 1) * limit;
+    
+    const query = { driver: req.user._id };
+    if (status) query.status = status;
+
+    const [bids, total] = await Promise.all([
+      Bid.find(query)
+        .populate({
+          path: 'load',
+          populate: { path: 'transporter', select: 'name companyName rating' }
+        })
+        .populate('truck', 'registrationNumber type')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit)),
+      Bid.countDocuments(query),
+    ]);
+
+    res.json({ success: true, data: { bids, total, page: Number(page) } });
+  } catch (err) { next(err); }
+};
+
+// GET /driver/bids/:loadId - Check if driver has bid on a specific load
+exports.getBidForLoad = async (req, res, next) => {
+  try {
+    const bid = await Bid.findOne({ 
+      load: req.params.loadId, 
+      driver: req.user._id 
+    });
+    res.json({ success: true, data: bid });
+  } catch (err) { next(err); }
+};
+
+// DELETE /driver/bids/:bidId - Withdraw a pending bid
+exports.withdrawBid = async (req, res, next) => {
+  try {
+    const bid = await Bid.findOne({ 
+      _id: req.params.bidId, 
+      driver: req.user._id,
+      status: 'pending'
+    });
+    
+    if (!bid) {
+      return res.status(404).json({ success: false, message: 'Bid not found or cannot be withdrawn.' });
+    }
+
+    await Bid.findByIdAndUpdate(bid._id, { status: 'withdrawn' });
+    res.json({ success: true, message: 'Bid withdrawn successfully.' });
   } catch (err) { next(err); }
 };

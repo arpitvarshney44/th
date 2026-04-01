@@ -38,7 +38,7 @@ const loadSchema = new mongoose.Schema(
     cancelReason: { type: String },
     cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
-  { timestamps: true, toJSON: { virtuals: true } },
+  { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );
 
 loadSchema.index({ 'pickupLocation.coordinates': '2dsphere' });

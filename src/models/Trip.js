@@ -28,12 +28,30 @@ const tripSchema = new mongoose.Schema(
     cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     paymentStatus: {
       type: String,
-      enum: ['pending', 'held', 'released', 'refunded'],
+      enum: ['pending', 'captured', 'held', 'partial_paid', 'completed', 'refunded', 'failed'],
       default: 'pending',
     },
     paymentReleasedAt: { type: Date },
     razorpayOrderId: { type: String },
     razorpayPaymentId: { type: String },
+    razorpaySignature: { type: String },
+
+    // Payout tracking
+    payoutStage: {
+      type: String,
+      enum: ['none', 'loading_paid', 'delivery_paid'],
+      default: 'none',
+    },
+    loadingPayoutAmount: { type: Number, default: 0 },
+    deliveryPayoutAmount: { type: Number, default: 0 },
+    loadingPayoutId: { type: String },
+    deliveryPayoutId: { type: String },
+    loadingPayoutAt: { type: Date },
+    deliveryPayoutAt: { type: Date },
+
+    // Driver Razorpay contact/fund account
+    driverContactId: { type: String },
+    driverFundAccountId: { type: String },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );
