@@ -16,6 +16,7 @@ router.patch('/users/:id/unblock', ctrl.unblockUser);
 
 // Verification
 router.get('/verifications', ctrl.getPendingVerifications);
+router.get('/verifications/trucks', ctrl.getPendingTrucks);
 router.patch('/verifications/users/:id', ctrl.verifyUser);
 router.patch('/verifications/trucks/:id', ctrl.verifyTruck);
 
@@ -25,6 +26,7 @@ router.get('/trips', ctrl.getAllTrips);
 
 // Payments
 router.get('/transactions', ctrl.getTransactions);
+router.get('/trip-payments', ctrl.getTripPayments);
 
 // Support
 router.get('/tickets', ctrl.getTickets);

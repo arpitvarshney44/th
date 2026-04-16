@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Truck = require('../models/Truck');
 const notificationService = require('../services/notificationService');
 const walletService = require('../services/walletService');
+const { getRoadDistance } = require('../services/distanceService');
 
 // ─── DRIVER ENDPOINTS ─────────────────────────────────────────────────────────
 
@@ -177,8 +178,12 @@ exports.postLoad = async (req, res, next) => {
   try {
     const { pickupLocation, dropLocation, loadType, weight, truckTypeRequired, offeredPrice, pickupDate, pickupTime, description } = req.body;
 
-    // Calculate rough distance (simplified)
-    const distance = Math.floor(Math.random() * 800 + 50); // TODO: integrate Google Maps Distance API
+    // Calculate road distance via Google Maps (falls back to Haversine if no API key)
+    const originLat = pickupLocation.latitude || 0;
+    const originLng = pickupLocation.longitude || 0;
+    const destLat = dropLocation.latitude || 0;
+    const destLng = dropLocation.longitude || 0;
+    const distance = await getRoadDistance(originLat, originLng, destLat, destLng);
 
     const load = await Load.create({
       transporter: req.user._id,

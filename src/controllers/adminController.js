@@ -143,14 +143,44 @@ exports.verifyUser = async (req, res, next) => {
 exports.verifyTruck = async (req, res, next) => {
   try {
     const { action, note } = req.body;
-    await Truck.findByIdAndUpdate(req.params.id, {
+    const truck = await Truck.findByIdAndUpdate(req.params.id, {
       verificationStatus: action === 'approve' ? 'approved' : 'rejected',
       isVerified: action === 'approve',
       verificationNote: note,
       verifiedAt: new Date(),
       verifiedBy: req.user._id,
-    });
+    }, { new: true }).populate('owner', 'name phone fcmToken');
+
+    // Notify driver
+    if (truck?.owner) {
+      await notificationService.sendNotification(truck.owner._id, {
+        title: action === 'approve' ? 'Truck Verified! 🚛' : 'Truck Verification Rejected',
+        body: action === 'approve'
+          ? `Your truck ${truck.registrationNumber} has been verified.`
+          : `Truck ${truck.registrationNumber} rejected: ${note || 'Please re-upload documents.'}`,
+        type: 'verification',
+        data: { truckId: truck._id.toString() },
+        fcmToken: truck.owner.fcmToken,
+      });
+    }
+
     res.json({ success: true, message: `Truck ${action === 'approve' ? 'approved' : 'rejected'}.` });
+  } catch (err) { next(err); }
+};
+
+exports.getPendingTrucks = async (req, res, next) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (page - 1) * limit;
+    const [trucks, total] = await Promise.all([
+      Truck.find({ verificationStatus: 'pending' })
+        .populate('owner', 'name phone')
+        .sort({ createdAt: 1 })
+        .skip(skip)
+        .limit(Number(limit)),
+      Truck.countDocuments({ verificationStatus: 'pending' }),
+    ]);
+    res.json({ success: true, data: { trucks, total, page: Number(page) } });
   } catch (err) { next(err); }
 };
 
@@ -198,6 +228,26 @@ exports.getTransactions = async (req, res, next) => {
       Transaction.countDocuments(query),
     ]);
     res.json({ success: true, data: { transactions, total, page: Number(page) } });
+  } catch (err) { next(err); }
+};
+
+exports.getTripPayments = async (req, res, next) => {
+  try {
+    const { paymentStatus, payoutStage, page = 1, limit = 20 } = req.query;
+    const query = {};
+    if (paymentStatus) query.paymentStatus = paymentStatus;
+    if (payoutStage) query.payoutStage = payoutStage;
+    const skip = (page - 1) * limit;
+    const [trips, total] = await Promise.all([
+      Trip.find(query)
+        .populate('load', 'pickupLocation dropLocation')
+        .populate('driver', 'name phone')
+        .populate('transporter', 'name companyName phone')
+        .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt status createdAt')
+        .sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+      Trip.countDocuments(query),
+    ]);
+    res.json({ success: true, data: { trips, total, page: Number(page) } });
   } catch (err) { next(err); }
 };
 

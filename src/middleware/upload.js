@@ -35,11 +35,12 @@ const upload = multer({
 });
 
 // Helper: convert disk path → URL path that the app can access
-// e.g. "uploads/abc123/license-171890.jpg" → "/uploads/abc123/license-171890.jpg"
+// e.g. "uploads/abc123/license-171890.jpg" → "uploads/abc123/license-171890.jpg"
+// Note: NO leading slash — getFileURL in the app prepends the server root with its own slash
 const fileUrl = (filePath) => {
   if (!filePath) return null;
-  // Normalise slashes and make relative to server root
-  return '/' + filePath.replace(/\\/g, '/');
+  // Normalise backslashes (Windows), strip any leading slash
+  return filePath.replace(/\\/g, '/').replace(/^\/+/, '');
 };
 
 module.exports = upload;

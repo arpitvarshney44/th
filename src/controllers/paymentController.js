@@ -51,14 +51,12 @@ exports.verifyPayment = async (req, res, next) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, tripId } = req.body;
 
-    // In production, verify signature. In dev, allow simulated payments.
-    if (process.env.NODE_ENV === 'production') {
-      const isValid = razorpayService.verifyPaymentSignature(
-        razorpay_order_id, razorpay_payment_id, razorpay_signature
-      );
-      if (!isValid) {
-        return res.status(400).json({ success: false, message: 'Payment verification failed.' });
-      }
+    // Verify Razorpay signature
+    const isValid = razorpayService.verifyPaymentSignature(
+      razorpay_order_id, razorpay_payment_id, razorpay_signature
+    );
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: 'Payment verification failed.' });
     }
 
     const trip = await Trip.findById(tripId).populate('load').populate('driver');

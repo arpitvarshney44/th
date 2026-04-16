@@ -22,8 +22,14 @@ const tripSchema = new mongoose.Schema(
       type: { type: String, enum: ['Point'], default: 'Point' },
       coordinates: { type: [Number], default: [0, 0] },
     },
-    deliveryProof: [{ type: String }], // image URLs
+    deliveryProof: [{ type: String }],
     deliveryNote: { type: String },
+    deliveryApprovedAt: { type: Date },
+
+    // Loading proof (driver uploads at pickup, transporter approves → 90% payout)
+    loadingProof: [{ type: String }],
+    loadingNote: { type: String },
+    loadingApprovedAt: { type: Date },
     cancelReason: { type: String },
     cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     paymentStatus: {
