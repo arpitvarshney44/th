@@ -308,8 +308,15 @@ exports.broadcastNotification = async (req, res, next) => {
     const query = { isActive: true, isBlocked: false };
     if (role) query.role = role;
     const users = await User.find(query).select('_id fcmToken');
-    await notificationService.sendToMultiple(users, { title, body, type });
-    res.json({ success: true, message: `Notification sent to ${users.length} users.` });
+    const broadcastId = `broadcast_${Date.now()}`;
+    const stats = await notificationService.sendToMultiple(users, {
+      title, body, type, broadcastId, sentBy: req.user._id,
+    });
+    res.json({
+      success: true,
+      message: `Notification sent to ${stats.total} users (${stats.sent} delivered, ${stats.failed} failed, ${stats.noToken} no token).`,
+      stats,
+    });
   } catch (err) { next(err); }
 };
 

@@ -50,7 +50,7 @@ const userSchema = new mongoose.Schema(
 
     // Transporter specific
     companyName: { type: String },
-    gstNumber: { type: String },
+    gstNumber: { type: String, sparse: true },
     totalShipments: { type: Number, default: 0 },
 
     // Admin specific
@@ -74,6 +74,7 @@ userSchema.index({ phone: 1, unique: true, sparse: true });
 userSchema.index({ email: 1, sparse: true });
 userSchema.index({ role: 1 });
 userSchema.index({ isActive: 1, isBlocked: 1 });
+userSchema.index({ gstNumber: 1, sparse: true, unique: true });
 
 // Hash password before save (admin only)
 userSchema.pre('save', async function (next) {

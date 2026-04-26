@@ -4,3 +4,4 @@ logs/
 uploads/
 .DS_Store
 *.log
+src/config/firebase-service-account.json
