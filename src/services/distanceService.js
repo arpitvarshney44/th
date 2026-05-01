@@ -30,38 +30,54 @@ const haversineDistance = (lat1, lng1, lat2, lng2) => {
 exports.getRoadDistance = async (originLat, originLng, destLat, destLng) => {
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
-  if (!apiKey || apiKey === 'your_google_maps_api_key') {
-    const dist = haversineDistance(originLat, originLng, destLat, destLng);
-    logger.warn(`[distanceService] No Google Maps API key — using Haversine fallback: ${dist} km`);
-    return dist;
+  // Use Google Maps if key is available
+  if (apiKey && apiKey !== 'your_google_maps_api_key' && apiKey.trim() !== '') {
+    try {
+      const { data } = await axios.get(
+        'https://maps.googleapis.com/maps/api/distancematrix/json',
+        {
+          params: {
+            origins: `${originLat},${originLng}`,
+            destinations: `${destLat},${destLng}`,
+            mode: 'driving',
+            units: 'metric',
+            key: apiKey,
+          },
+          timeout: 5000,
+        },
+      );
+
+      const element = data?.rows?.[0]?.elements?.[0];
+      if (element?.status === 'OK') {
+        const meters = element.distance.value;
+        return Math.round(meters / 1000);
+      }
+      logger.warn(`[distanceService] Google Maps returned status: ${element?.status} — trying OSRM fallback`);
+    } catch (err) {
+      logger.error(`[distanceService] Google Maps API error: ${err.message} — trying OSRM fallback`);
+    }
   }
 
+  // Use OSRM as a completely free road distance calculation fallback
   try {
     const { data } = await axios.get(
-      'https://maps.googleapis.com/maps/api/distancematrix/json',
-      {
-        params: {
-          origins: `${originLat},${originLng}`,
-          destinations: `${destLat},${destLng}`,
-          mode: 'driving',
-          units: 'metric',
-          key: apiKey,
-        },
-        timeout: 5000,
-      },
+      `http://router.project-osrm.org/route/v1/driving/${originLng},${originLat};${destLng},${destLat}?overview=false`,
+      { timeout: 5000 }
     );
 
-    const element = data?.rows?.[0]?.elements?.[0];
-
-    if (element?.status === 'OK') {
-      const meters = element.distance.value;
-      return Math.round(meters / 1000);
+    if (data?.routes?.[0]?.distance) {
+      const meters = data.routes[0].distance;
+      const dist = Math.round(meters / 1000);
+      logger.info(`[distanceService] OSRM calculated road distance: ${dist} km`);
+      return dist;
     }
-
-    logger.warn(`[distanceService] Google Maps returned status: ${element?.status} — falling back to Haversine`);
+    logger.warn(`[distanceService] OSRM returned no distance — using Haversine`);
   } catch (err) {
-    logger.error(`[distanceService] Google Maps API error: ${err.message} — falling back to Haversine`);
+    logger.error(`[distanceService] OSRM API error: ${err.message} — falling back to Haversine`);
   }
 
-  return haversineDistance(originLat, originLng, destLat, destLng);
+  // Fallback to straight-line Haversine
+  const dist = haversineDistance(originLat, originLng, destLat, destLng);
+  logger.info(`[distanceService] Fallback to Haversine: ${dist} km`);
+  return dist;
 };

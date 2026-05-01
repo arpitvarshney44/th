@@ -12,12 +12,16 @@ router.put('/profile', ctrl.updateProfile);
 router.patch('/availability', ctrl.updateAvailability);
 router.patch('/location', ctrl.updateLocation);
 router.get('/trucks', ctrl.getTrucks);
-router.post('/trucks', ctrl.addTruck);
+router.post('/trucks', upload.fields([
+  { name: 'rc', maxCount: 1 },
+  { name: 'additional', maxCount: 1 }
+]), ctrl.addTruck);
 router.post('/documents', upload.fields([
   { name: 'license', maxCount: 1 },
   { name: 'licenseBack', maxCount: 1 },
   { name: 'aadhar', maxCount: 1 },
   { name: 'pan', maxCount: 1 },
+  { name: 'passbook', maxCount: 1 },
   { name: 'driverPhoto', maxCount: 1 },
   { name: 'profileImage', maxCount: 1 },
   { name: 'rc', maxCount: 1 },

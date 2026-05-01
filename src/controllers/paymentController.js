@@ -113,60 +113,20 @@ exports.verifyPayment = async (req, res, next) => {
 const processDriverPayout = async (trip, percentage, stage) => {
   const driver = await User.findById(trip.driver);
   if (!driver) throw new Error('Driver not found');
-  if (!driver.bankAccount?.accountNumber || !driver.bankAccount?.ifscCode) {
-    // No bank account - credit to wallet instead
-    const amount = Math.round(trip.driverEarnings * percentage);
-    await walletService.credit(
-      driver._id,
-      amount,
-      `${stage === 'loading_paid' ? 'Loading' : 'Delivery'} payout (${Math.round(percentage * 100)}%)`,
-      'trip_earning',
-      trip._id,
-    );
-    return { id: `wallet_${Date.now()}`, status: 'wallet_credited', amount };
-  }
 
-  // Ensure Razorpay contact exists
-  let contactId = trip.driverContactId;
-  if (!contactId) {
-    const contact = await razorpayService.createContact(
-      driver.bankAccount.accountHolderName || driver.name,
-      driver.phone,
-      driver.email,
-    );
-    contactId = contact.id;
-    await Trip.findByIdAndUpdate(trip._id, { driverContactId: contactId });
-  }
-
-  // Ensure fund account exists
-  let fundAccountId = trip.driverFundAccountId;
-  if (!fundAccountId) {
-    const fundAccount = await razorpayService.createFundAccount(contactId, driver.bankAccount);
-    fundAccountId = fundAccount.id;
-    await Trip.findByIdAndUpdate(trip._id, { driverFundAccountId: fundAccountId });
-  }
-
-  // Calculate payout amount
   const amount = Math.round(trip.driverEarnings * percentage);
-  const referenceId = `${trip._id}_${stage}`;
 
-  // Create payout
-  const payout = await razorpayService.createPayout(
-    fundAccountId, amount, 'payout', referenceId
-  );
-
-  // Also credit wallet for tracking
   await walletService.credit(
     driver._id,
     amount,
     `${stage === 'loading_paid' ? 'Loading' : 'Delivery'} payout (${Math.round(percentage * 100)}%)`,
     'trip_earning',
     trip._id,
-    payout.id,
   );
 
-  return { id: payout.id, status: payout.status, amount };
+  return { id: `wallet_${Date.now()}`, status: 'wallet_credited', amount };
 };
+
 
 // ─── Trip Start → 90% Payout ─────────────────────────────────────────────────
 

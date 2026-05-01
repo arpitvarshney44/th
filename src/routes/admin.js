@@ -152,4 +152,73 @@ router.get('/tds-declarations', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ─── CONTACT NUMBERS MANAGEMENT ───────────────────────────────────────────────
+const ContactNumber = require('../models/ContactNumber');
+
+// GET /admin/contacts
+router.get('/contacts', async (req, res, next) => {
+  try {
+    const contacts = await ContactNumber.find({ isActive: true }).sort({ createdAt: -1 });
+    res.json({ success: true, data: contacts });
+  } catch (err) { next(err); }
+});
+
+// POST /admin/contacts
+router.post('/contacts', async (req, res, next) => {
+  try {
+    const { name, phone, designation } = req.body;
+    if (!name || !phone) return res.status(400).json({ success: false, message: 'Name and phone are required.' });
+    const contact = await ContactNumber.create({ name, phone, designation, createdBy: req.user._id });
+    res.status(201).json({ success: true, data: contact });
+  } catch (err) { next(err); }
+});
+
+// PUT /admin/contacts/:id
+router.put('/contacts/:id', async (req, res, next) => {
+  try {
+    const { name, phone, designation } = req.body;
+    const contact = await ContactNumber.findByIdAndUpdate(req.params.id, { name, phone, designation }, { new: true });
+    if (!contact) return res.status(404).json({ success: false, message: 'Contact not found.' });
+    res.json({ success: true, data: contact });
+  } catch (err) { next(err); }
+});
+
+// DELETE /admin/contacts/:id
+router.delete('/contacts/:id', async (req, res, next) => {
+  try {
+    await ContactNumber.findByIdAndUpdate(req.params.id, { isActive: false });
+    res.json({ success: true, message: 'Contact deleted.' });
+  } catch (err) { next(err); }
+});
+
+// PATCH /admin/trips/:id/assign-contact — Assign a contact number to a trip
+const Trip = require('../models/Trip');
+router.patch('/trips/:id/assign-contact', async (req, res, next) => {
+  try {
+    const { contactId } = req.body;
+    if (!contactId) return res.status(400).json({ success: false, message: 'contactId is required.' });
+
+    const contact = await ContactNumber.findById(contactId);
+    if (!contact) return res.status(404).json({ success: false, message: 'Contact not found.' });
+
+    const trip = await Trip.findByIdAndUpdate(req.params.id, {
+      assignedContact: {
+        name: contact.name,
+        phone: contact.phone,
+        designation: contact.designation,
+      },
+    }, { new: true });
+
+    if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
+    res.json({ success: true, data: trip });
+  } catch (err) { next(err); }
+});
+
+const upload = require('../middleware/upload');
+router.get('/memo-settings', ctrl.getMemoSettings);
+router.post('/memo-settings', upload.fields([
+  { name: 'cheque', maxCount: 1 },
+  { name: 'pan', maxCount: 1 }
+]), ctrl.updateMemoSettings);
+
 module.exports = router;

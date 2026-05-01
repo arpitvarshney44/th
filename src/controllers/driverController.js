@@ -69,6 +69,8 @@ exports.addTruck = async (req, res, next) => {
       model,
       year,
       length,
+      ...(req.files?.rc && { rcImage: fileUrl(req.files.rc[0].path) }),
+      ...(req.files?.additional && { additionalImage: fileUrl(req.files.additional[0].path) }),
     });
     res.status(201).json({ success: true, data: truck });
   } catch (err) { next(err); }
@@ -90,6 +92,7 @@ exports.uploadDocuments = async (req, res, next) => {
     if (req.files?.licenseBack) updates.licenseImageBack = fileUrl(req.files.licenseBack[0].path);
     if (req.files?.aadhar) updates.aadharImage = fileUrl(req.files.aadhar[0].path);
     if (req.files?.pan) updates.panImage = fileUrl(req.files.pan[0].path);
+    if (req.files?.passbook) updates.passbookImage = fileUrl(req.files.passbook[0].path);
     if (req.files?.driverPhoto) updates.driverPhoto = fileUrl(req.files.driverPhoto[0].path);
     if (req.files?.profileImage) updates.profileImage = fileUrl(req.files.profileImage[0].path);
     if (req.files?.rc) {

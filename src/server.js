@@ -5,7 +5,6 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const rateLimit = require('express-rate-limit');
 const path = require('path');
 
 const connectDB = require('./config/db');
@@ -37,6 +36,7 @@ connectDB();
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
   crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: false,
 }));
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
 app.use(express.json({ limit: '10mb' }));
@@ -49,13 +49,6 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
     res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   }
 }));
-
-// Rate limiting
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: 'Too many requests.' });
-const otpLimiter = rateLimit({ windowMs: 60 * 1000, max: 3, message: 'Too many OTP requests.' });
-app.use('/api', limiter);
-app.use('/api/v1/auth/send-otp', otpLimiter);
-app.use('/api/v1/auth/resend-otp', otpLimiter);
 
 // API Routes
 app.use('/api/v1/auth', authRoutes);

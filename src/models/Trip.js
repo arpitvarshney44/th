@@ -58,6 +58,13 @@ const tripSchema = new mongoose.Schema(
     // Driver Razorpay contact/fund account
     driverContactId: { type: String },
     driverFundAccountId: { type: String },
+
+    // Admin-assigned contact for driver communication
+    assignedContact: {
+      name: { type: String },
+      phone: { type: String },
+      designation: { type: String },
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );

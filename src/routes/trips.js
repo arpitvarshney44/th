@@ -3,7 +3,10 @@ const { protect, authorize } = require('../middleware/auth');
 const upload = require('../middleware/upload');
 const ctrl = require('../controllers/tripController');
 
+router.get('/:id/loading-memo', ctrl.getLoadingMemo);
+
 router.use(protect);
+
 
 // Driver actions
 router.patch('/:id/start',          authorize('driver', 'fleet_owner'), ctrl.startTrip);

@@ -39,6 +39,7 @@ const truckSchema = new mongoose.Schema(
     rcImage: { type: String },
     insuranceImage: { type: String },
     fitnessImage: { type: String },
+    additionalImage: { type: String },
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
     verificationStatus: {

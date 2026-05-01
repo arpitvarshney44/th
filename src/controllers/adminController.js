@@ -353,3 +353,48 @@ exports.getAnalytics = async (req, res, next) => {
     res.json({ success: true, data: { dailyTrips, cityActivity, truckTypeStats, revenueByDay } });
   } catch (err) { next(err); }
 };
+
+const Settings = require('../models/Settings');
+
+exports.getMemoSettings = async (req, res, next) => {
+  try {
+    let settings = await Settings.findOne({ key: 'company_memo_settings' });
+    if (!settings) {
+      settings = {
+        key: 'company_memo_settings',
+        value: {
+          companyName: 'TruxHire Solutions Pvt Ltd',
+          address: 'Main Rd, Opp outer ring road, Bengaluru, Karnataka- 560103',
+          gstNumber: '29AAACZ8319C1Z7',
+          bankName: 'Kotak Mahindra Bank',
+          accountNumber: '7948035729',
+          ifscCode: 'KKBK0008066',
+          branchName: '22, Ground Floor, M.G.Road, Bengaluru, Karnataka 560001',
+          chequeImage: '',
+          panImage: '',
+          panNumber: 'AAACZ8319C',
+        }
+      };
+    }
+    res.json({ success: true, data: settings.value });
+  } catch (err) { next(err); }
+};
+
+exports.updateMemoSettings = async (req, res, next) => {
+  try {
+    const value = req.body;
+    if (req.files && req.files.cheque) {
+      value.chequeImage = req.files.cheque[0].path;
+    }
+    if (req.files && req.files.pan) {
+      value.panImage = req.files.pan[0].path;
+    }
+
+    let settings = await Settings.findOneAndUpdate(
+      { key: 'company_memo_settings' },
+      { value, updatedBy: req.user._id },
+      { new: true, upsert: true }
+    );
+    res.json({ success: true, data: settings.value });
+  } catch (err) { next(err); }
+};

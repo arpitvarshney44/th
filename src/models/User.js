@@ -31,6 +31,7 @@ const userSchema = new mongoose.Schema(
     aadharImage: { type: String },
     panNumber: { type: String },
     panImage: { type: String },
+    passbookImage: { type: String },
     driverPhoto: { type: String },
     isAvailable: { type: Boolean, default: true },
     totalTrips: { type: Number, default: 0 },
