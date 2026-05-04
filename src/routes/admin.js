@@ -11,6 +11,7 @@ router.get('/analytics', ctrl.getAnalytics);
 // Users
 router.get('/users', ctrl.getUsers);
 router.get('/users/:id', ctrl.getUserById);
+router.put('/users/:id', ctrl.updateUser);
 router.patch('/users/:id/block', ctrl.blockUser);
 router.patch('/users/:id/unblock', ctrl.unblockUser);
 
@@ -22,7 +23,28 @@ router.patch('/verifications/trucks/:id', ctrl.verifyTruck);
 
 // Loads & Trips
 router.get('/loads', ctrl.getAllLoads);
+router.get('/loads/:id', async (req, res, next) => {
+  try {
+    const Load = require('../models/Load');
+    const load = await Load.findById(req.params.id).populate('transporter', 'name companyName phone email gstNumber');
+    if (!load) return res.status(404).json({ success: false, message: 'Load not found.' });
+    res.json({ success: true, data: load });
+  } catch (err) { next(err); }
+});
 router.get('/trips', ctrl.getAllTrips);
+router.get('/trips/:id', async (req, res, next) => {
+  try {
+    const Trip = require('../models/Trip');
+    const Truck = require('../models/Truck');
+    const trip = await Trip.findById(req.params.id)
+      .populate('load')
+      .populate('driver', 'name phone licenseNumber licenseImage aadharImage panImage driverPhoto profileImage bankAccount')
+      .populate('transporter', 'name companyName phone email gstNumber profileImage');
+    if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
+    const truck = trip.truck ? await Truck.findById(trip.truck) : null;
+    res.json({ success: true, data: { ...trip.toObject(), truckDetails: truck } });
+  } catch (err) { next(err); }
+});
 
 // Payments
 router.get('/transactions', ctrl.getTransactions);
@@ -220,5 +242,105 @@ router.post('/memo-settings', upload.fields([
   { name: 'cheque', maxCount: 1 },
   { name: 'pan', maxCount: 1 }
 ]), ctrl.updateMemoSettings);
+
+// ─── STAFF MANAGEMENT (super admin only) ──────────────────────────────────────
+const bcrypt = require('bcryptjs');
+
+// Middleware: only super admin can manage staff
+const superOnly = (req, res, next) => {
+  if (req.user.adminLevel !== 'super') {
+    return res.status(403).json({ success: false, message: 'Only super admin can manage staff.' });
+  }
+  next();
+};
+
+// GET /admin/staff — list all admin staff
+router.get('/staff', superOnly, async (req, res, next) => {
+  try {
+    const User = require('../models/User');
+    const staff = await User.find({ role: 'admin' })
+      .select('name email adminLevel isActive isBlocked createdAt lastLogin')
+      .sort({ createdAt: -1 });
+    res.json({ success: true, data: staff });
+  } catch (err) { next(err); }
+});
+
+// POST /admin/staff — create new staff member
+router.post('/staff', superOnly, async (req, res, next) => {
+  try {
+    const User = require('../models/User');
+    const { name, email, password, adminLevel } = req.body;
+    if (!name || !email || !password || !adminLevel) {
+      return res.status(400).json({ success: false, message: 'name, email, password, and adminLevel are required.' });
+    }
+    if (!['trucker', 'shipper'].includes(adminLevel)) {
+      return res.status(400).json({ success: false, message: 'Invalid role. Must be trucker or shipper.' });
+    }
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(400).json({ success: false, message: 'Email already exists.' });
+
+    const user = await User.create({
+      name, email, password, role: 'admin', adminLevel, isActive: true,
+    });
+    res.status(201).json({
+      success: true,
+      data: { id: user._id, name: user.name, email: user.email, adminLevel: user.adminLevel },
+    });
+  } catch (err) { next(err); }
+});
+
+// PUT /admin/staff/:id — update staff
+router.put('/staff/:id', superOnly, async (req, res, next) => {
+  try {
+    const User = require('../models/User');
+    const { name, email, adminLevel, password } = req.body;
+    const updates = {};
+    if (name) updates.name = name;
+    if (email) updates.email = email;
+    if (adminLevel) updates.adminLevel = adminLevel;
+    if (password) updates.password = await bcrypt.hash(password, 12);
+    const user = await User.findByIdAndUpdate(req.params.id, updates, { new: true })
+      .select('name email adminLevel isActive isBlocked');
+    if (!user) return res.status(404).json({ success: false, message: 'Staff not found.' });
+    res.json({ success: true, data: user });
+  } catch (err) { next(err); }
+});
+
+// DELETE /admin/staff/:id — deactivate staff
+router.delete('/staff/:id', superOnly, async (req, res, next) => {
+  try {
+    const User = require('../models/User');
+    await User.findByIdAndUpdate(req.params.id, { isActive: false, isBlocked: true });
+    res.json({ success: true, message: 'Staff deactivated.' });
+  } catch (err) { next(err); }
+});
+
+// ─── LOAD EDITING (trucker + super) ───────────────────────────────────────────
+const Load = require('../models/Load');
+
+// PUT /admin/loads/:id — edit load details (not status)
+router.put('/loads/:id', async (req, res, next) => {
+  try {
+    if (!['super', 'trucker'].includes(req.user.adminLevel)) {
+      return res.status(403).json({ success: false, message: 'Not authorized to edit loads.' });
+    }
+    const { pickupLocation, dropLocation, loadType, weight, truckTypeRequired, offeredPrice, pickupDate, pickupTime, description } = req.body;
+    const updates = {};
+    if (pickupLocation) updates.pickupLocation = pickupLocation;
+    if (dropLocation) updates.dropLocation = dropLocation;
+    if (loadType) updates.loadType = loadType;
+    if (weight) updates.weight = weight;
+    if (truckTypeRequired) updates.truckTypeRequired = truckTypeRequired;
+    if (offeredPrice) updates.offeredPrice = offeredPrice;
+    if (pickupDate) updates.pickupDate = pickupDate;
+    if (pickupTime) updates.pickupTime = pickupTime;
+    if (description !== undefined) updates.description = description;
+    // Status cannot be changed by trucker
+    const load = await Load.findByIdAndUpdate(req.params.id, updates, { new: true })
+      .populate('transporter', 'name companyName phone');
+    if (!load) return res.status(404).json({ success: false, message: 'Load not found.' });
+    res.json({ success: true, data: load });
+  } catch (err) { next(err); }
+});
 
 module.exports = router;

@@ -55,7 +55,7 @@ const userSchema = new mongoose.Schema(
     totalShipments: { type: Number, default: 0 },
 
     // Admin specific
-    adminLevel: { type: String, enum: ['super', 'manager', 'support'], default: 'support' },
+    adminLevel: { type: String, enum: ['super', 'manager', 'support', 'trucker', 'shipper'], default: 'support' },
 
     // Verification status
     verificationStatus: {

@@ -84,6 +84,21 @@ exports.getUserById = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+exports.updateUser = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+    const { bankAccount, ...otherFields } = req.body;
+    if (bankAccount) {
+      user.bankAccount = { ...user.bankAccount, ...bankAccount };
+    }
+    Object.assign(user, otherFields);
+    await user.save();
+    res.json({ success: true, data: user });
+  } catch (err) { next(err); }
+};
+
+
 exports.blockUser = async (req, res, next) => {
   try {
     const { reason } = req.body;
@@ -243,7 +258,7 @@ exports.getTripPayments = async (req, res, next) => {
         .populate('load', 'pickupLocation dropLocation')
         .populate('driver', 'name phone')
         .populate('transporter', 'name companyName phone')
-        .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt status createdAt')
+        .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt loadingPayoutId deliveryPayoutId razorpayOrderId razorpayPaymentId status createdAt')
         .sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
       Trip.countDocuments(query),
     ]);
