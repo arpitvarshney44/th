@@ -105,6 +105,19 @@ exports.acceptLoad = async (req, res, next) => {
     const truck = await Truck.findOne({ _id: truckId, owner: req.user._id });
     if (!truck) return res.status(400).json({ success: false, message: 'Truck not found.' });
 
+    // Block if truck is already on an ongoing trip
+    const ACTIVE_STATUSES = ['accepted', 'started', 'in_transit', 'delivered'];
+    const truckBusy = await Trip.findOne({
+      truck: truck._id,
+      status: { $in: ACTIVE_STATUSES },
+    });
+    if (truckBusy) {
+      return res.status(400).json({
+        success: false,
+        message: 'This truck is currently on another trip. Complete that trip before accepting a new load.',
+      });
+    }
+
     // Create trip
     const commission = Math.round(load.offeredPrice * (Number(process.env.PLATFORM_COMMISSION || 10) / 100));
     const trip = await Trip.create({
@@ -144,6 +157,23 @@ exports.placeBid = async (req, res, next) => {
     const load = await Load.findById(req.params.id);
     if (!load || load.status !== 'posted') {
       return res.status(400).json({ success: false, message: 'Load not available for bidding.' });
+    }
+
+    if (!truckId) {
+      return res.status(400).json({ success: false, message: 'Please select a truck.' });
+    }
+
+    // Block bidding if the chosen truck is already in an ongoing trip
+    const ACTIVE_STATUSES = ['accepted', 'started', 'in_transit', 'delivered'];
+    const truckBusy = await Trip.findOne({
+      truck: truckId,
+      status: { $in: ACTIVE_STATUSES },
+    });
+    if (truckBusy) {
+      return res.status(400).json({
+        success: false,
+        message: 'This truck is currently on another trip. Complete that trip before bidding on a new load.',
+      });
     }
 
     const existing = await Bid.findOne({ load: load._id, driver: req.user._id });

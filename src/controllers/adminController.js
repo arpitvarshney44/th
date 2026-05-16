@@ -235,14 +235,337 @@ exports.getAllTrips = async (req, res, next) => {
 
 exports.getTransactions = async (req, res, next) => {
   try {
-    const { category, page = 1, limit = 20 } = req.query;
-    const query = category ? { category } : {};
+    const { category, status, userId, role, search, page = 1, limit = 20 } = req.query;
+    const query = {};
+    if (category) query.category = category;
+    if (status) query.status = status;
+    if (userId) query.user = userId;
+    if (search) query.referenceId = { $regex: String(search), $options: 'i' };
+
+    // If role filter requested, restrict to users with that role
+    if (role) {
+      const matchedUserIds = await User.find({ role }).distinct('_id');
+      query.user = { $in: matchedUserIds };
+    }
+
     const skip = (page - 1) * limit;
-    const [transactions, total] = await Promise.all([
-      Transaction.find(query).populate('user', 'name phone companyName').sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    const [transactions, total, walletAgg] = await Promise.all([
+      Transaction.find(query)
+        .populate('user', 'name phone companyName email role bankAccount cashfreeBeneficiaryId walletBalance')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit)),
       Transaction.countDocuments(query),
+      // Real driver-wallets balance (authoritative — single source of truth)
+      role
+        ? User.aggregate([
+            { $match: { role } },
+            { $group: { _id: null, total: { $sum: { $ifNull: ['$walletBalance', 0] } }, count: { $sum: 1 } } },
+          ])
+        : Promise.resolve([]),
     ]);
-    res.json({ success: true, data: { transactions, total, page: Number(page) } });
+
+    const wallet = walletAgg[0] || { total: 0, count: 0 };
+
+    res.json({
+      success: true,
+      data: {
+        transactions,
+        total,
+        page: Number(page),
+        stats: {
+          walletTotal: wallet.total,
+          userCount: wallet.count,
+        },
+      },
+    });
+  } catch (err) { next(err); }
+};
+
+// ─── Withdrawals admin actions ────────────────────────────────────────────────
+
+const cashfreeService = require('../services/cashfreeService');
+const walletService = require('../services/walletService');
+
+/**
+ * GET /admin/withdrawals?status=pending|completed|failed&search=&userId=
+ * Returns withdrawal transactions with the linked user blob.
+ */
+exports.getWithdrawals = async (req, res, next) => {
+  try {
+    const { status, userId, search, page = 1, limit = 20 } = req.query;
+    const query = { category: 'withdrawal' };
+    if (status) query.status = status;
+    if (userId) query.user = userId;
+    if (search) query.referenceId = { $regex: String(search), $options: 'i' };
+
+    const skip = (page - 1) * limit;
+    const [withdrawals, total, pendingTotal, completedTotal, failedTotal] = await Promise.all([
+      Transaction.find(query)
+        .populate('user', 'name phone companyName email role bankAccount cashfreeBeneficiaryId walletBalance')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit)),
+      Transaction.countDocuments(query),
+      Transaction.aggregate([
+        { $match: { category: 'withdrawal', status: 'pending' } },
+        { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      ]),
+      Transaction.aggregate([
+        { $match: { category: 'withdrawal', status: 'completed' } },
+        { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      ]),
+      Transaction.aggregate([
+        { $match: { category: 'withdrawal', status: 'failed' } },
+        { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      ]),
+    ]);
+
+    // Attach linked refund info to failed withdrawals
+    const failedIds = withdrawals
+      .filter(w => w.status === 'failed' && w.metadata?.refundTxId)
+      .map(w => w.metadata.refundTxId);
+
+    const refundMap = new Map();
+    if (failedIds.length) {
+      const refunds = await Transaction.find({ _id: { $in: failedIds } })
+        .select('_id amount status createdAt referenceId description');
+      refunds.forEach(r => refundMap.set(r._id.toString(), r));
+    }
+
+    // Also fall back: any refund tx whose `referenceId` equals a withdrawal _id (older records)
+    const orphanLookup = await Transaction.find({
+      category: 'refund',
+      referenceId: { $in: withdrawals.map(w => w._id.toString()) },
+    }).select('_id amount status createdAt referenceId description');
+    orphanLookup.forEach(r => {
+      if (!refundMap.has(r._id.toString())) {
+        refundMap.set(`ref_${r.referenceId}`, r);
+      }
+    });
+
+    const data = withdrawals.map((w) => {
+      const obj = w.toObject();
+      let refund = null;
+      if (obj.metadata?.refundTxId) refund = refundMap.get(obj.metadata.refundTxId);
+      if (!refund) refund = refundMap.get(`ref_${obj._id.toString()}`);
+      return { ...obj, refund: refund || null };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        withdrawals: data,
+        total,
+        page: Number(page),
+        stats: {
+          pending: pendingTotal[0] || { count: 0, amount: 0 },
+          completed: completedTotal[0] || { count: 0, amount: 0 },
+          failed: failedTotal[0] || { count: 0, amount: 0 },
+        },
+      },
+    });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /admin/withdrawals/:id/retry
+ * Retry the Cashfree payout for a pending withdrawal.
+ */
+exports.retryWithdrawal = async (req, res, next) => {
+  try {
+    const tx = await Transaction.findById(req.params.id).populate('user');
+    if (!tx) return res.status(404).json({ success: false, message: 'Transaction not found.' });
+    if (tx.category !== 'withdrawal') {
+      return res.status(400).json({ success: false, message: 'Not a withdrawal transaction.' });
+    }
+    if (tx.status !== 'pending') {
+      return res.status(400).json({ success: false, message: `Cannot retry — already ${tx.status}.` });
+    }
+
+    const user = tx.user;
+    if (!user?.bankAccount?.accountNumber || !user?.bankAccount?.ifscCode) {
+      return res.status(400).json({ success: false, message: 'User bank account is incomplete.' });
+    }
+
+    let beneId = user.cashfreeBeneficiaryId;
+    if (!beneId) {
+      try {
+        const bene = await cashfreeService.addBeneficiary(user._id, user);
+        beneId = bene.id;
+        await User.findByIdAndUpdate(user._id, { cashfreeBeneficiaryId: beneId });
+      } catch (err) {
+        await Transaction.findByIdAndUpdate(tx._id, {
+          metadata: { ...(tx.metadata || {}), failureReason: err.message, stage: 'beneficiary', lastRetryAt: new Date() },
+        });
+        return res.status(502).json({ success: false, message: err.message });
+      }
+    }
+
+    // Cashfree v2 transfer_id: max 40 chars, alphanumeric + underscore only.
+    const userTail = String(user._id).slice(-12);
+    const transferId = `wd_${userTail}_r_${Date.now().toString().slice(-10)}`;
+    try {
+      const payout = await cashfreeService.createPayout(
+        beneId, tx.amount, transferId, 'TruxHire wallet withdrawal (retry)',
+      );
+
+      // v2 returns RECEIVED on success — keep pending until webhook/refresh confirms credit
+      const remoteStatus = String(payout.status || '').toUpperCase();
+      const isFinal = ['SUCCESS', 'COMPLETED'].includes(remoteStatus);
+
+      await Transaction.findByIdAndUpdate(tx._id, {
+        status: isFinal ? 'completed' : 'pending',
+        referenceId: payout.id,
+        metadata: {
+          ...(tx.metadata || {}),
+          transferId,
+          beneficiaryId: beneId,
+          payoutStatus: remoteStatus || 'RECEIVED',
+          cfTransferId: payout.id,
+          retriedBy: req.user._id,
+          retriedAt: new Date(),
+        },
+      });
+      return res.json({
+        success: true,
+        message: isFinal ? 'Payout completed.' : 'Payout submitted, awaiting bank credit.',
+      });
+    } catch (err) {
+      await Transaction.findByIdAndUpdate(tx._id, {
+        metadata: { ...(tx.metadata || {}), failureReason: err.message, stage: 'payout', transferId, lastRetryAt: new Date() },
+      });
+      return res.status(502).json({ success: false, message: err.message });
+    }
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /admin/withdrawals/:id/mark-paid
+ * Manually mark a withdrawal as completed (e.g. paid offline by the team).
+ * Body: { referenceId?, note? }
+ */
+exports.markWithdrawalPaid = async (req, res, next) => {
+  try {
+    const { referenceId, note } = req.body;
+    const tx = await Transaction.findById(req.params.id);
+    if (!tx) return res.status(404).json({ success: false, message: 'Transaction not found.' });
+    if (tx.category !== 'withdrawal') {
+      return res.status(400).json({ success: false, message: 'Not a withdrawal transaction.' });
+    }
+    if (tx.status === 'completed') {
+      return res.status(400).json({ success: false, message: 'Already completed.' });
+    }
+
+    await Transaction.findByIdAndUpdate(tx._id, {
+      status: 'completed',
+      referenceId: referenceId || tx.referenceId || `manual_${Date.now()}`,
+      metadata: {
+        ...(tx.metadata || {}),
+        markedManuallyBy: req.user._id,
+        markedManuallyAt: new Date(),
+        manualNote: note || '',
+      },
+    });
+
+    return res.json({ success: true, message: 'Withdrawal marked as paid.' });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /admin/withdrawals/:id/refresh
+ * Pull the latest status of a withdrawal from Cashfree and reconcile our DB.
+ */
+exports.refreshWithdrawalStatus = async (req, res, next) => {
+  try {
+    const tx = await Transaction.findById(req.params.id);
+    if (!tx) return res.status(404).json({ success: false, message: 'Transaction not found.' });
+    if (tx.category !== 'withdrawal') {
+      return res.status(400).json({ success: false, message: 'Not a withdrawal transaction.' });
+    }
+    const transferId = tx.metadata?.transferId;
+    if (!transferId) {
+      return res.status(400).json({ success: false, message: 'No transferId on this withdrawal — nothing to refresh.' });
+    }
+
+    const remote = await cashfreeService.getPayoutStatus(transferId);
+    if (!remote) {
+      return res.status(502).json({ success: false, message: 'Could not reach Cashfree.' });
+    }
+
+    const status = String(remote.status || remote.data?.status || '').toUpperCase();
+    const utr = remote.transfer_utr || remote.data?.transfer_utr || null;
+    const cfTransferId = remote.cf_transfer_id || remote.data?.cf_transfer_id || null;
+    const SUCCESS = ['SUCCESS', 'COMPLETED'];
+    const FAILURE = ['FAILED', 'REVERSED', 'REJECTED'];
+
+    if (SUCCESS.includes(status) && tx.status !== 'completed') {
+      await Transaction.findByIdAndUpdate(tx._id, {
+        status: 'completed',
+        referenceId: utr || cfTransferId || tx.referenceId,
+        metadata: { ...(tx.metadata || {}), refreshedStatus: status, utr, cfTransferId, refreshedAt: new Date() },
+      });
+      return res.json({ success: true, message: `Updated to completed${utr ? ` (UTR ${utr})` : ''}.`, data: { status, utr } });
+    }
+    if (FAILURE.includes(status) && tx.status !== 'failed') {
+      const refundTx = await walletService.credit(
+        tx.user, tx.amount,
+        'Withdrawal refund - bank rejected (status sync)',
+        'refund', null, tx._id.toString(),
+      );
+      await Transaction.findByIdAndUpdate(tx._id, {
+        status: 'failed',
+        metadata: { ...(tx.metadata || {}), refreshedStatus: status, refreshedAt: new Date(), refundTxId: refundTx._id.toString(), refundedAt: new Date() },
+      });
+      return res.json({ success: true, message: 'Updated to failed and refunded.', data: { status } });
+    }
+    return res.json({ success: true, message: `Still ${status || 'unknown'}.`, data: { status } });
+  } catch (err) { next(err); }
+};
+
+/**
+ * POST /admin/withdrawals/:id/reject
+ * Reject the withdrawal: mark as failed and refund the wallet.
+ * Body: { reason }
+ */
+exports.rejectWithdrawal = async (req, res, next) => {
+  try {
+    const { reason } = req.body;
+    const tx = await Transaction.findById(req.params.id);
+    if (!tx) return res.status(404).json({ success: false, message: 'Transaction not found.' });
+    if (tx.category !== 'withdrawal') {
+      return res.status(400).json({ success: false, message: 'Not a withdrawal transaction.' });
+    }
+    if (tx.status === 'completed') {
+      return res.status(400).json({ success: false, message: 'Cannot reject a completed withdrawal.' });
+    }
+    if (tx.status === 'failed') {
+      return res.status(400).json({ success: false, message: 'Already rejected.' });
+    }
+
+    // 1. Refund wallet first so we have the refund tx id
+    const refundTx = await walletService.credit(
+      tx.user, tx.amount,
+      `Withdrawal refund${reason ? ` - ${reason}` : ''}`,
+      'refund',
+      null,
+      tx._id.toString(),
+    );
+
+    // 2. Mark original withdrawal failed and link refund
+    await Transaction.findByIdAndUpdate(tx._id, {
+      status: 'failed',
+      metadata: {
+        ...(tx.metadata || {}),
+        rejectedBy: req.user._id,
+        rejectedAt: new Date(),
+        rejectionReason: reason || 'Rejected by admin',
+        refundTxId: refundTx._id.toString(),
+        refundedAt: new Date(),
+      },
+    });
+
+    return res.json({ success: true, message: 'Withdrawal rejected and amount refunded.' });
   } catch (err) { next(err); }
 };
 
@@ -253,16 +576,63 @@ exports.getTripPayments = async (req, res, next) => {
     if (paymentStatus) query.paymentStatus = paymentStatus;
     if (payoutStage) query.payoutStage = payoutStage;
     const skip = (page - 1) * limit;
-    const [trips, total] = await Promise.all([
+
+    const [trips, total, capturedAgg, commissionAgg, awaitingCount, paidOutAgg] = await Promise.all([
       Trip.find(query)
         .populate('load', 'pickupLocation dropLocation')
         .populate('driver', 'name phone')
         .populate('transporter', 'name companyName phone')
-        .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt loadingPayoutId deliveryPayoutId razorpayOrderId razorpayPaymentId status createdAt')
+        .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt loadingPayoutId deliveryPayoutId paymentOrderId paymentTransactionId status createdAt')
         .sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
       Trip.countDocuments(query),
+      // Total amount captured (paid by transporters) across the platform
+      Trip.aggregate([
+        { $match: { ...query, paymentStatus: { $in: ['captured', 'partial_paid', 'completed'] } } },
+        { $group: { _id: null, total: { $sum: '$agreedPrice' }, count: { $sum: 1 } } },
+      ]),
+      // Total commission earned (only on trips where driver got at least 90% out)
+      Trip.aggregate([
+        { $match: { ...query, payoutStage: { $in: ['loading_paid', 'delivery_paid'] } } },
+        { $group: { _id: null, total: { $sum: '$platformCommission' }, count: { $sum: 1 } } },
+      ]),
+      // Trips still awaiting transporter payment
+      Trip.countDocuments({
+        ...query,
+        paymentStatus: 'pending',
+        status: { $nin: ['cancelled', 'completed'] },
+      }),
+      // Total paid out to drivers
+      Trip.aggregate([
+        { $match: { ...query } },
+        {
+          $group: {
+            _id: null,
+            loading: { $sum: { $ifNull: ['$loadingPayoutAmount', 0] } },
+            delivery: { $sum: { $ifNull: ['$deliveryPayoutAmount', 0] } },
+          },
+        },
+      ]),
     ]);
-    res.json({ success: true, data: { trips, total, page: Number(page) } });
+
+    const captured = capturedAgg[0] || { total: 0, count: 0 };
+    const commission = commissionAgg[0] || { total: 0, count: 0 };
+    const paidOut = paidOutAgg[0] || { loading: 0, delivery: 0 };
+
+    res.json({
+      success: true,
+      data: {
+        trips,
+        total,
+        page: Number(page),
+        stats: {
+          capturedAmount: captured.total,
+          capturedCount: captured.count,
+          commissionEarned: commission.total,
+          awaitingPaymentCount: awaitingCount,
+          totalPaidToDrivers: paidOut.loading + paidOut.delivery,
+        },
+      },
+    });
   } catch (err) { next(err); }
 };
 

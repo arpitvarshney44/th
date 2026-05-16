@@ -2,7 +2,7 @@ const router = require('express').Router();
 const { protect, authorize } = require('../middleware/auth');
 const ctrl = require('../controllers/paymentController');
 
-// Webhook (no auth - Razorpay calls this)
+// Webhook (no auth - Cashfree calls this)
 router.post('/webhook', ctrl.handleWebhook);
 
 // Authenticated routes

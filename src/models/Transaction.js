@@ -13,7 +13,7 @@ const transactionSchema = new mongoose.Schema(
       enum: ['trip_earning', 'trip_payment', 'withdrawal', 'refund', 'commission', 'bonus'],
       required: true,
     },
-    referenceId: { type: String }, // Razorpay payment ID etc.
+    referenceId: { type: String }, // Cashfree payment ID etc.
     balanceBefore: { type: Number, default: 0 },
     balanceAfter: { type: Number, default: 0 },
     metadata: { type: mongoose.Schema.Types.Mixed },

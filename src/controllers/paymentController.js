@@ -1,7 +1,6 @@
 const Trip = require('../models/Trip');
-const Load = require('../models/Load');
 const User = require('../models/User');
-const razorpayService = require('../services/razorpayService');
+const cashfreeService = require('../services/cashfreeService');
 const walletService = require('../services/walletService');
 const notificationService = require('../services/notificationService');
 const logger = require('../config/logger');
@@ -13,32 +12,39 @@ exports.createOrder = async (req, res, next) => {
   try {
     const { tripId } = req.body;
     const trip = await Trip.findOne({ _id: tripId, transporter: req.user._id })
-      .populate('load');
+      .populate('load')
+      .populate('transporter', 'name phone email companyName');
     if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
     if (trip.paymentStatus !== 'pending') {
       return res.status(400).json({ success: false, message: 'Payment already processed.' });
     }
 
     const amount = trip.agreedPrice;
-    const receipt = `trip_${trip._id}`;
-    const notes = {
+    const orderId = `trip_${trip._id}_${Date.now()}`;
+
+    const order = await cashfreeService.createOrder(amount, orderId, {
+      id: req.user._id.toString(),
+      name: trip.transporter.companyName || trip.transporter.name,
+      email: trip.transporter.email,
+      phone: trip.transporter.phone,
+    }, {
       tripId: trip._id.toString(),
       loadId: trip.load._id.toString(),
-      transporterId: req.user._id.toString(),
-    };
+      note: `Payment for trip from ${trip.load.pickupLocation.city} to ${trip.load.dropLocation.city}`,
+    });
 
-    const order = await razorpayService.createOrder(amount, 'INR', receipt, notes);
-
-    await Trip.findByIdAndUpdate(trip._id, { razorpayOrderId: order.id });
+    await Trip.findByIdAndUpdate(trip._id, { paymentOrderId: order.order_id });
 
     res.json({
       success: true,
       data: {
-        orderId: order.id,
-        amount: order.amount,
-        currency: order.currency,
+        orderId: order.order_id,
+        paymentSessionId: order.payment_session_id,
+        amount: order.order_amount,
+        currency: order.order_currency,
         tripId: trip._id,
-        keyId: process.env.RAZORPAY_KEY_ID,
+        appId: process.env.CASHFREE_PG_APP_ID,
+        env: process.env.CASHFREE_ENV || 'sandbox',
       },
     });
   } catch (err) { next(err); }
@@ -49,14 +55,15 @@ exports.createOrder = async (req, res, next) => {
 // POST /payments/verify
 exports.verifyPayment = async (req, res, next) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, tripId } = req.body;
+    const { orderId, tripId } = req.body;
+    if (!orderId || !tripId) {
+      return res.status(400).json({ success: false, message: 'orderId and tripId are required.' });
+    }
 
-    // Verify Razorpay signature
-    const isValid = razorpayService.verifyPaymentSignature(
-      razorpay_order_id, razorpay_payment_id, razorpay_signature
-    );
-    if (!isValid) {
-      return res.status(400).json({ success: false, message: 'Payment verification failed.' });
+    // Fetch payment status from Cashfree
+    const payment = await cashfreeService.verifyPayment(orderId);
+    if (payment.status !== 'SUCCESS') {
+      return res.status(400).json({ success: false, message: `Payment ${payment.status?.toLowerCase()}.` });
     }
 
     const trip = await Trip.findById(tripId).populate('load').populate('driver');
@@ -64,20 +71,9 @@ exports.verifyPayment = async (req, res, next) => {
 
     // Update trip with payment info
     await Trip.findByIdAndUpdate(trip._id, {
-      razorpayPaymentId: razorpay_payment_id,
-      razorpaySignature: razorpay_signature,
+      paymentOrderId: orderId,
+      paymentTransactionId: payment.paymentId,
       paymentStatus: 'captured',
-    });
-
-    // Debit transporter wallet (record the payment)
-    await walletService.debit(
-      trip.transporter,
-      trip.agreedPrice,
-      `Payment for load ${trip.load.pickupLocation.city} → ${trip.load.dropLocation.city}`,
-      'trip_payment',
-      trip._id,
-    ).catch(() => {
-      // If wallet debit fails (insufficient balance), that's ok - payment was via Razorpay
     });
 
     // Record as transporter transaction
@@ -90,7 +86,7 @@ exports.verifyPayment = async (req, res, next) => {
       category: 'trip_payment',
       status: 'completed',
       trip: trip._id,
-      referenceId: razorpay_payment_id,
+      referenceId: payment.paymentId,
       balanceBefore: 0,
       balanceAfter: 0,
     }).catch(() => {});
@@ -104,29 +100,31 @@ exports.verifyPayment = async (req, res, next) => {
       fcmToken: trip.driver.fcmToken,
     });
 
-    res.json({ success: true, message: 'Payment verified successfully.', data: { paymentId: razorpay_payment_id } });
+    res.json({ success: true, message: 'Payment verified successfully.', data: { paymentId: payment.paymentId } });
   } catch (err) { next(err); }
 };
 
 // ─── Payout to Driver (called internally) ─────────────────────────────────────
-
+// At trip approval stages we ONLY credit the driver's in-app wallet.
+// The actual bank transfer happens later when the driver requests a withdrawal.
 const processDriverPayout = async (trip, percentage, stage) => {
-  const driver = await User.findById(trip.driver);
-  if (!driver) throw new Error('Driver not found');
-
   const amount = Math.round(trip.driverEarnings * percentage);
+  const stageLabel = stage === 'loading_paid' ? 'Loading (90%)' : 'Delivery (10%)';
 
-  await walletService.credit(
-    driver._id,
+  const tx = await walletService.credit(
+    trip.driver,
     amount,
-    `${stage === 'loading_paid' ? 'Loading' : 'Delivery'} payout (${Math.round(percentage * 100)}%)`,
+    `${stageLabel} earnings credited to wallet`,
     'trip_earning',
     trip._id,
   );
 
-  return { id: `wallet_${Date.now()}`, status: 'wallet_credited', amount };
+  return {
+    id: tx?._id?.toString() || `wallet_${Date.now()}`,
+    status: 'wallet_credited',
+    amount,
+  };
 };
-
 
 // ─── Trip Start → 90% Payout ─────────────────────────────────────────────────
 
@@ -137,10 +135,9 @@ exports.processLoadingPayout = async (tripId) => {
     logger.info(`Trip ${tripId} already has payout stage: ${trip.payoutStage}`);
     return null;
   }
-  if (trip.paymentStatus !== 'captured') {
-    logger.info(`Trip ${tripId} payment not captured yet, skipping payout`);
-    return null;
-  }
+  // Note: We intentionally do NOT block on transporter payment status.
+  // The driver gets 90% credited to wallet as soon as transporter approves loading.
+  // Transporter can settle the actual payment to TruxHire whenever they want.
 
   try {
     const result = await processDriverPayout(trip, 0.9, 'loading_paid');
@@ -154,14 +151,14 @@ exports.processLoadingPayout = async (tripId) => {
 
     const driver = await User.findById(trip.driver);
     await notificationService.sendNotification(trip.driver, {
-      title: 'Payout Released! 💸',
-      body: `₹${result.amount.toLocaleString('en-IN')} (90%) has been released for loading.`,
+      title: 'Wallet Credited! 💰',
+      body: `₹${result.amount.toLocaleString('en-IN')} (90%) added to your wallet. You can withdraw anytime.`,
       type: 'payment',
       data: { tripId: trip._id.toString() },
       fcmToken: driver?.fcmToken,
     });
 
-    logger.info(`Loading payout of ₹${result.amount} processed for trip ${tripId}`);
+    logger.info(`Loading credit of ₹${result.amount} added to wallet for trip ${tripId}`);
     return result;
   } catch (err) {
     logger.error(`Loading payout failed for trip ${tripId}:`, err);
@@ -182,25 +179,31 @@ exports.processDeliveryPayout = async (tripId) => {
   try {
     const result = await processDriverPayout(trip, 0.1, 'delivery_paid');
 
-    await Trip.findByIdAndUpdate(tripId, {
+    const update = {
       payoutStage: 'delivery_paid',
-      paymentStatus: 'completed',
       deliveryPayoutAmount: result.amount,
       deliveryPayoutId: result.id,
       deliveryPayoutAt: new Date(),
       paymentReleasedAt: new Date(),
-    });
+    };
+    // Only mark payment 'completed' if transporter has already paid.
+    // If the transporter hasn't paid yet, leave paymentStatus untouched
+    // so admins/finance can chase the payment separately.
+    if (trip.paymentStatus === 'captured') {
+      update.paymentStatus = 'completed';
+    }
+    await Trip.findByIdAndUpdate(tripId, update);
 
     const driver = await User.findById(trip.driver);
     await notificationService.sendNotification(trip.driver, {
-      title: 'Final Payout! 🎉',
-      body: `₹${result.amount.toLocaleString('en-IN')} (10%) released. Full payment complete!`,
+      title: 'Wallet Credited! 🎉',
+      body: `₹${result.amount.toLocaleString('en-IN')} (10%) added to your wallet. Trip complete!`,
       type: 'payment',
       data: { tripId: trip._id.toString() },
       fcmToken: driver?.fcmToken,
     });
 
-    logger.info(`Delivery payout of ₹${result.amount} processed for trip ${tripId}`);
+    logger.info(`Delivery credit of ₹${result.amount} added to wallet for trip ${tripId}`);
     return result;
   } catch (err) {
     logger.error(`Delivery payout failed for trip ${tripId}:`, err);
@@ -208,13 +211,13 @@ exports.processDeliveryPayout = async (tripId) => {
   }
 };
 
-// ─── GET /payments/trip/:tripId ───────────────────────────────────────────────
+// ─── Get Trip Payment Details ────────────────────────────────────────────────
 
 exports.getTripPaymentDetails = async (req, res, next) => {
   try {
     const trip = await Trip.findById(req.params.tripId)
       .populate('load', 'pickupLocation dropLocation')
-      .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt razorpayPaymentId');
+      .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt paymentTransactionId paymentOrderId');
 
     if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
 
@@ -222,57 +225,51 @@ exports.getTripPaymentDetails = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ─── Razorpay Webhook ─────────────────────────────────────────────────────────
+// ─── Cashfree Webhook ─────────────────────────────────────────────────────────
 
 exports.handleWebhook = async (req, res) => {
   try {
-    const signature = req.headers['x-razorpay-signature'];
-    const body = JSON.stringify(req.body);
+    const signature = req.headers['x-webhook-signature'];
+    const timestamp = req.headers['x-webhook-timestamp'];
+    const rawBody = req.rawBody || JSON.stringify(req.body);
 
-    if (process.env.RAZORPAY_WEBHOOK_SECRET) {
-      const isValid = razorpayService.verifyWebhookSignature(body, signature);
-      if (!isValid) return res.status(400).json({ message: 'Invalid signature' });
+    if (process.env.CASHFREE_PG_SECRET_KEY) {
+      const isValid = cashfreeService.verifyWebhookSignature(rawBody, signature, timestamp);
+      if (!isValid) {
+        logger.warn('[Cashfree Webhook] Invalid signature');
+        return res.status(400).json({ message: 'Invalid signature' });
+      }
     }
 
-    const event = req.body.event;
-    const payload = req.body.payload;
+    const { type, data } = req.body;
+    logger.info(`[Cashfree Webhook] Received: ${type}`);
 
-    switch (event) {
-      case 'payment.captured': {
-        const payment = payload.payment.entity;
-        const orderId = payment.order_id;
-        const trip = await Trip.findOne({ razorpayOrderId: orderId });
-        if (trip && trip.paymentStatus === 'pending') {
-          await Trip.findByIdAndUpdate(trip._id, {
-            paymentStatus: 'captured',
-            razorpayPaymentId: payment.id,
-          });
-          logger.info(`Webhook: Payment captured for trip ${trip._id}`);
-        }
-        break;
+    if (type === 'PAYMENT_SUCCESS_WEBHOOK') {
+      const payment = data?.payment;
+      const order = data?.order;
+      if (!order?.order_id) return res.status(200).json({ ok: true });
+
+      const trip = await Trip.findOne({ paymentOrderId: order.order_id });
+      if (trip && trip.paymentStatus === 'pending') {
+        await Trip.findByIdAndUpdate(trip._id, {
+          paymentStatus: 'captured',
+          paymentTransactionId: payment?.cf_payment_id?.toString(),
+        });
+        logger.info(`Webhook: Payment captured for trip ${trip._id}`);
       }
-      case 'payment.failed': {
-        const payment = payload.payment.entity;
-        const orderId = payment.order_id;
-        const trip = await Trip.findOne({ razorpayOrderId: orderId });
-        if (trip) {
-          await Trip.findByIdAndUpdate(trip._id, { paymentStatus: 'failed' });
-          logger.info(`Webhook: Payment failed for trip ${trip._id}`);
-        }
-        break;
+    } else if (type === 'PAYMENT_FAILED_WEBHOOK') {
+      const order = data?.order;
+      if (!order?.order_id) return res.status(200).json({ ok: true });
+      const trip = await Trip.findOne({ paymentOrderId: order.order_id });
+      if (trip) {
+        await Trip.findByIdAndUpdate(trip._id, { paymentStatus: 'failed' });
+        logger.info(`Webhook: Payment failed for trip ${trip._id}`);
       }
-      case 'payout.processed':
-      case 'payout.reversed': {
-        logger.info(`Webhook: Payout event ${event}`, payload);
-        break;
-      }
-      default:
-        logger.info(`Webhook: Unhandled event ${event}`);
     }
 
-    res.json({ status: 'ok' });
+    res.status(200).json({ ok: true });
   } catch (err) {
-    logger.error('Webhook error:', err);
-    res.status(500).json({ message: 'Webhook processing failed' });
+    logger.error(`[Cashfree Webhook] Error: ${err.message}`);
+    res.status(500).json({ message: err.message });
   }
 };

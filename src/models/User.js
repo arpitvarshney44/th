@@ -49,6 +49,9 @@ const userSchema = new mongoose.Schema(
       bankName: { type: String },
     },
 
+    // Cashfree payout beneficiary (cached after first successful payout)
+    cashfreeBeneficiaryId: { type: String },
+
     // Transporter specific
     companyName: { type: String },
     gstNumber: { type: String, sparse: true },

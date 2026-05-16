@@ -2,6 +2,9 @@ const router = require('express').Router();
 const { protect, authorize } = require('../middleware/auth');
 const ctrl = require('../controllers/walletController');
 
+// Cashfree Payouts webhook (no auth — Cashfree calls this)
+router.post('/payouts-webhook', ctrl.handlePayoutsWebhook);
+
 router.use(protect);
 
 router.get('/balance', ctrl.getBalance);

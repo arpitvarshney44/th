@@ -38,9 +38,10 @@ const tripSchema = new mongoose.Schema(
       default: 'pending',
     },
     paymentReleasedAt: { type: Date },
-    razorpayOrderId: { type: String },
-    razorpayPaymentId: { type: String },
-    razorpaySignature: { type: String },
+    // Cashfree payment IDs
+    paymentOrderId: { type: String },        // Cashfree order_id
+    paymentTransactionId: { type: String },  // Cashfree cf_payment_id / payment_id
+    paymentSignature: { type: String },
 
     // Payout tracking
     payoutStage: {
@@ -55,9 +56,8 @@ const tripSchema = new mongoose.Schema(
     loadingPayoutAt: { type: Date },
     deliveryPayoutAt: { type: Date },
 
-    // Driver Razorpay contact/fund account
-    driverContactId: { type: String },
-    driverFundAccountId: { type: String },
+    // Driver Cashfree beneficiary
+    driverBeneficiaryId: { type: String },
 
     // Admin-assigned contact for driver communication
     assignedContact: {

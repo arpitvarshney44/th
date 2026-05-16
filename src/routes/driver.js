@@ -27,6 +27,7 @@ router.post('/documents', upload.fields([
   { name: 'rc', maxCount: 1 },
 ]), ctrl.uploadDocuments);
 router.get('/trips/active', ctrl.getActiveTrip);
+router.get('/trips/active-list', ctrl.getActiveTrips);
 router.get('/trips/history', ctrl.getTripHistory);
 router.get('/bids', ctrl.getMyBids);
 router.get('/bids/:loadId', ctrl.getBidForLoad);

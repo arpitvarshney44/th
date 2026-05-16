@@ -50,6 +50,13 @@ router.get('/trips/:id', async (req, res, next) => {
 router.get('/transactions', ctrl.getTransactions);
 router.get('/trip-payments', ctrl.getTripPayments);
 
+// Withdrawals
+router.get('/withdrawals', ctrl.getWithdrawals);
+router.post('/withdrawals/:id/retry', ctrl.retryWithdrawal);
+router.post('/withdrawals/:id/refresh', ctrl.refreshWithdrawalStatus);
+router.post('/withdrawals/:id/mark-paid', ctrl.markWithdrawalPaid);
+router.post('/withdrawals/:id/reject', ctrl.rejectWithdrawal);
+
 // Support
 router.get('/tickets', ctrl.getTickets);
 router.post('/tickets/:id/reply', ctrl.replyTicket);

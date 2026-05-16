@@ -50,3 +50,34 @@ exports.debit = async (userId, amount, description, category, tripId = null) => 
 
   return tx;
 };
+
+/**
+ * Debit the wallet but record the transaction as `pending`.
+ * Used for withdrawals where the actual bank transfer is async — the wallet is
+ * locked immediately, but the transaction is only marked `completed` once the
+ * payout provider confirms success (or `failed` if admin rejects).
+ */
+exports.debitPending = async (userId, amount, description, category, tripId = null) => {
+  const user = await User.findById(userId);
+  if (!user) throw new Error('User not found');
+  if (user.walletBalance < amount) throw new Error('Insufficient wallet balance');
+
+  const balanceBefore = user.walletBalance;
+  const balanceAfter = balanceBefore - amount;
+
+  await User.findByIdAndUpdate(userId, { $inc: { walletBalance: -amount } });
+
+  const tx = await Transaction.create({
+    user: userId,
+    type: 'debit',
+    amount,
+    description,
+    category,
+    status: 'pending',
+    trip: tripId,
+    balanceBefore,
+    balanceAfter,
+  });
+
+  return tx;
+};

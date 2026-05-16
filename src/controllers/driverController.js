@@ -145,6 +145,22 @@ exports.getActiveTrip = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// GET /driver/trips/active-list  — all currently ongoing trips for this driver
+exports.getActiveTrips = async (req, res, next) => {
+  try {
+    const trips = await Trip.find({
+      driver: req.user._id,
+      status: { $in: ['accepted', 'started', 'in_transit', 'delivered'] },
+    })
+      .populate('load')
+      .populate('transporter', 'name companyName phone rating')
+      .populate('truck', 'registrationNumber type')
+      .sort({ createdAt: -1 });
+
+    res.json({ success: true, data: trips });
+  } catch (err) { next(err); }
+};
+
 // GET /driver/bids
 exports.getMyBids = async (req, res, next) => {
   try {
