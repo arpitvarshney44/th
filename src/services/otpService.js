@@ -40,7 +40,42 @@ const sendViaSMS = async (phone, otp) => {
 };
 
 exports.sendOTP = async (identifier, channel = 'sms') => {
-  // Delete existing OTPs for this identifier
+  // ─── Rate limit guards (prevent SMS spam / accidental loops) ───────────────
+  const RESEND_COOLDOWN_SEC = 30;       // can't request again within 30s
+  const HOURLY_LIMIT = 5;               // max 5 OTPs per hour
+  const DAILY_LIMIT = 15;               // max 15 OTPs per day
+
+  const now = new Date();
+  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+  const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  // Latest OTP for this phone
+  const latest = await OTP.findOne({ phone: identifier }).sort({ createdAt: -1 });
+  if (latest) {
+    const secsSince = Math.floor((now - latest.createdAt) / 1000);
+    if (secsSince < RESEND_COOLDOWN_SEC) {
+      const wait = RESEND_COOLDOWN_SEC - secsSince;
+      const err = new Error(`Please wait ${wait}s before requesting another OTP.`);
+      err.statusCode = 429;
+      throw err;
+    }
+  }
+
+  const hourlyCount = await OTP.countDocuments({ phone: identifier, createdAt: { $gte: oneHourAgo } });
+  if (hourlyCount >= HOURLY_LIMIT) {
+    const err = new Error('Too many OTP requests. Please try again after an hour.');
+    err.statusCode = 429;
+    throw err;
+  }
+
+  const dailyCount = await OTP.countDocuments({ phone: identifier, createdAt: { $gte: oneDayAgo } });
+  if (dailyCount >= DAILY_LIMIT) {
+    const err = new Error('Daily OTP limit reached. Please contact support.');
+    err.statusCode = 429;
+    throw err;
+  }
+
+  // Delete existing unused OTPs for this identifier so we don't accumulate
   await OTP.deleteMany({ phone: identifier });
 
   const otp = generateOTP();
