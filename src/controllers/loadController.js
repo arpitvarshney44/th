@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Truck = require('../models/Truck');
 const notificationService = require('../services/notificationService');
 const walletService = require('../services/walletService');
+const platformSettings = require('../services/platformSettings');
 const { getRoadDistance } = require('../services/distanceService');
 const axios = require('axios');
 
@@ -105,11 +106,13 @@ exports.acceptLoad = async (req, res, next) => {
     const truck = await Truck.findOne({ _id: truckId, owner: req.user._id });
     if (!truck) return res.status(400).json({ success: false, message: 'Truck not found.' });
 
-    // Block if truck is already on an ongoing trip
+    // Block if truck is already on an ongoing trip (skip trips whose load was cancelled by admin)
     const ACTIVE_STATUSES = ['accepted', 'started', 'in_transit', 'delivered'];
+    const cancelledLoadIds = await Load.find({ status: 'cancelled' }).distinct('_id');
     const truckBusy = await Trip.findOne({
       truck: truck._id,
       status: { $in: ACTIVE_STATUSES },
+      load: { $nin: cancelledLoadIds },
     });
     if (truckBusy) {
       return res.status(400).json({
@@ -119,15 +122,15 @@ exports.acceptLoad = async (req, res, next) => {
     }
 
     // Create trip
-    const commission = Math.round(load.offeredPrice * (Number(process.env.PLATFORM_COMMISSION || 10) / 100));
+    const split = await platformSettings.computeSplit(load.offeredPrice);
     const trip = await Trip.create({
       load: load._id,
       driver: req.user._id,
       transporter: load.transporter._id,
       truck: truck._id,
       agreedPrice: load.offeredPrice,
-      platformCommission: commission,
-      driverEarnings: load.offeredPrice - commission,
+      platformCommission: split.commission,
+      driverEarnings: split.driverEarnings,
     });
 
     await Load.findByIdAndUpdate(load._id, {
@@ -164,10 +167,13 @@ exports.placeBid = async (req, res, next) => {
     }
 
     // Block bidding if the chosen truck is already in an ongoing trip
+    // (Skip trips whose underlying load was cancelled by admin — truck is free again)
     const ACTIVE_STATUSES = ['accepted', 'started', 'in_transit', 'delivered'];
+    const cancelledLoadIds = await Load.find({ status: 'cancelled' }).distinct('_id');
     const truckBusy = await Trip.findOne({
       truck: truckId,
       status: { $in: ACTIVE_STATUSES },
+      load: { $nin: cancelledLoadIds },
     });
     if (truckBusy) {
       return res.status(400).json({
@@ -341,7 +347,7 @@ exports.acceptBid = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Bid not available.' });
     }
 
-    const commission = Math.round(bid.amount * (Number(process.env.PLATFORM_COMMISSION || 10) / 100));
+    const split = await platformSettings.computeSplit(bid.amount);
     const trip = await Trip.create({
       load: load._id,
       driver: bid.driver._id,
@@ -349,8 +355,8 @@ exports.acceptBid = async (req, res, next) => {
       truck: bid.truck._id,
       bid: bid._id,
       agreedPrice: bid.amount,
-      platformCommission: commission,
-      driverEarnings: bid.amount - commission,
+      platformCommission: split.commission,
+      driverEarnings: split.driverEarnings,
     });
 
     await Promise.all([
@@ -449,5 +455,7 @@ const formatLoad = (load) => {
     transporterName: t?.companyName || t?.name || 'Unknown',
     transporterRating: t?.rating || 0,
     transporterImage: t?.profileImage,
+    cancelReason: obj.cancelReason || null,
+    cancelledBy: obj.cancelledBy || null,
   };
 };

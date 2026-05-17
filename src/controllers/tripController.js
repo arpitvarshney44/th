@@ -3,6 +3,7 @@ const Load = require('../models/Load');
 const User = require('../models/User');
 const Rating = require('../models/Rating');
 const walletService = require('../services/walletService');
+const platformSettings = require('../services/platformSettings');
 const notificationService = require('../services/notificationService');
 const paymentController = require('./paymentController');
 const logger = require('../config/logger');
@@ -71,7 +72,7 @@ exports.uploadLoadingProof = async (req, res, next) => {
     const transporter = await User.findById(trip.transporter);
     await notificationService.sendNotification(trip.transporter, {
       title: 'Loading Complete — Approval Needed 📦',
-      body: 'Driver has uploaded loading proof. Please review and approve to release 90% payment.',
+      body: `Driver has uploaded loading proof. Please review and approve to release the loading payment.`,
       type: 'payment',
       data: { tripId: trip._id.toString(), action: 'approve_loading' },
       fcmToken: transporter?.fcmToken,
@@ -87,11 +88,12 @@ exports.approveLoading = async (req, res, next) => {
   try {
     const trip = await Trip.findOne({ _id: req.params.id, transporter: req.user._id });
     if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
-    if (trip.status !== 'in_transit') {
-      return res.status(400).json({ success: false, message: 'Loading proof not yet submitted.' });
-    }
     if (trip.payoutStage !== 'none') {
       return res.status(400).json({ success: false, message: 'Loading already approved.' });
+    }
+    // Loading proof must exist before approval
+    if (!trip.loadingProof || trip.loadingProof.length === 0) {
+      return res.status(400).json({ success: false, message: 'Loading proof not yet submitted.' });
     }
 
     await Trip.findByIdAndUpdate(trip._id, { loadingApprovedAt: new Date() });
@@ -105,15 +107,16 @@ exports.approveLoading = async (req, res, next) => {
     }
 
     const driver = await User.findById(trip.driver);
+    const loadingPct = Math.round((await platformSettings.getLoadingSplitRate()) * 100);
     await notificationService.sendNotification(trip.driver, {
       title: 'Loading Approved! 💸',
-      body: '90% of your payment has been released. Continue to delivery.',
+      body: `${loadingPct}% of your payment has been released. Continue to delivery.`,
       type: 'payment',
       data: { tripId: trip._id.toString() },
       fcmToken: driver?.fcmToken,
     });
 
-    res.json({ success: true, message: 'Loading approved. 90% payout initiated.' });
+    res.json({ success: true, message: `Loading approved. ${loadingPct}% payout initiated.` });
   } catch (err) { next(err); }
 };
 
@@ -145,7 +148,7 @@ exports.completeTrip = async (req, res, next) => {
     // Notify transporter to approve delivery
     await notificationService.sendNotification(trip.transporter._id, {
       title: 'Delivery Done — Approval Needed ✅',
-      body: 'Driver has uploaded delivery proof. Please review and approve to release final 10% payment.',
+      body: 'Driver has uploaded delivery proof. Please review and approve to release the final payment.',
       type: 'payment',
       data: { tripId: trip._id.toString(), action: 'approve_delivery' },
       fcmToken: trip.transporter.fcmToken,
@@ -168,6 +171,25 @@ exports.approveDelivery = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Delivery already approved.' });
     }
 
+    // ─── Auto-approve loading if transporter skipped that step ───
+    // Some transporters approve delivery directly. We still owe the driver
+    // the loading payout — release it first so they get the full amount.
+    if (trip.payoutStage === 'none') {
+      try {
+        await Trip.findByIdAndUpdate(trip._id, {
+          loadingApprovedAt: trip.loadingApprovedAt || new Date(),
+        });
+        await paymentController.processLoadingPayout(trip._id);
+        logger.info(`[approveDelivery] Auto-approved loading for trip ${trip._id}`);
+      } catch (err) {
+        logger.error(`[approveDelivery] Auto-loading payout failed: ${err.message}`);
+        return res.status(500).json({
+          success: false,
+          message: 'Could not release the pending loading payout. Please try again.',
+        });
+      }
+    }
+
     await Trip.findByIdAndUpdate(trip._id, {
       deliveryApprovedAt: new Date(),
       status: 'completed',
@@ -176,34 +198,39 @@ exports.approveDelivery = async (req, res, next) => {
     await Load.findByIdAndUpdate(trip.load, { status: 'completed' });
     await User.findByIdAndUpdate(trip.driver, { $inc: { totalTrips: 1 } });
 
-    // Release 10% payout
+    // Release final payout
     try {
       await paymentController.processDeliveryPayout(trip._id);
     } catch (err) {
       logger.error('Delivery payout failed:', err.message);
-      // Fallback: credit to wallet
-      if (trip.payoutStage !== 'delivery_paid') {
-        const deliveryAmount = Math.round(trip.driverEarnings * 0.1);
-        await walletService.credit(
-          trip.driver,
-          deliveryAmount,
-          'Delivery payout (10%) - wallet fallback',
-          'trip_earning',
-          trip._id,
-        );
-      }
+      // Fallback: credit to wallet so the driver doesn't lose their share
+      const deliveryRate = await platformSettings.getDeliverySplitRate();
+      const deliveryAmount = Math.round(trip.driverEarnings * deliveryRate);
+      const pct = Math.round(deliveryRate * 100);
+      await walletService.credit(
+        trip.driver,
+        deliveryAmount,
+        `Delivery payout (${pct}%) - wallet fallback`,
+        'trip_earning',
+        trip._id,
+      );
+      await Trip.findByIdAndUpdate(trip._id, {
+        payoutStage: 'delivery_paid',
+        deliveryPayoutAmount: deliveryAmount,
+        deliveryPayoutAt: new Date(),
+      });
     }
 
     const driver = await User.findById(trip.driver);
     await notificationService.sendNotification(trip.driver, {
       title: 'Trip Complete! 🎉',
-      body: 'Final 10% payment has been released. Great job!',
+      body: 'Final payment has been released to your wallet.',
       type: 'payment',
       data: { tripId: trip._id.toString() },
       fcmToken: driver?.fcmToken,
     });
 
-    res.json({ success: true, message: 'Delivery approved. Final payout initiated.' });
+    res.json({ success: true, message: 'Delivery approved. Final payout released.' });
   } catch (err) { next(err); }
 };
 
@@ -226,9 +253,11 @@ exports.updateLocation = async (req, res, next) => {
 // ─── GET /shipments/active (transporter) ─────────────────────────────────────
 exports.getActiveShipments = async (req, res, next) => {
   try {
+    const cancelledLoadIds = await Load.find({ status: 'cancelled' }).distinct('_id');
     const trips = await Trip.find({
       transporter: req.user._id,
       status: { $in: ['accepted', 'started', 'in_transit', 'delivered'] },
+      load: { $nin: cancelledLoadIds },
     })
       .populate('load')
       .populate('driver', 'name phone rating profileImage')
@@ -320,8 +349,11 @@ exports.getLoadingMemo = async (req, res, next) => {
     const transporter = await User.findById(trip.transporter);
 
     const offeredPrice = load?.offeredPrice || 0;
-    const advance = Math.round(offeredPrice * 0.9);
+    const loadingRate = await platformSettings.getLoadingSplitRate();
+    const advance = Math.round(offeredPrice * loadingRate);
     const balance = offeredPrice - advance;
+    const advancePct = Math.round(loadingRate * 100);
+    const balancePct = 100 - advancePct;
 
     // Base64 helper
     const toBase64 = (p) => {
@@ -459,11 +491,11 @@ exports.getLoadingMemo = async (req, res, next) => {
           </tr>
           <tr>
             <td class="label">Advance (Rs)</td>
-            <td class="val">: ₹${advance.toLocaleString('en-IN')} (90%)</td>
+            <td class="val">: ₹${advance.toLocaleString('en-IN')} (${advancePct}%)</td>
           </tr>
           <tr>
             <td class="label">Balance (Rs)</td>
-            <td class="val">: ₹${balance.toLocaleString('en-IN')} (10%)</td>
+            <td class="val">: ₹${balance.toLocaleString('en-IN')} (${balancePct}%)</td>
           </tr>
         </table>
 

@@ -2,6 +2,7 @@ const Trip = require('../models/Trip');
 const User = require('../models/User');
 const cashfreeService = require('../services/cashfreeService');
 const walletService = require('../services/walletService');
+const platformSettings = require('../services/platformSettings');
 const notificationService = require('../services/notificationService');
 const logger = require('../config/logger');
 
@@ -109,7 +110,8 @@ exports.verifyPayment = async (req, res, next) => {
 // The actual bank transfer happens later when the driver requests a withdrawal.
 const processDriverPayout = async (trip, percentage, stage) => {
   const amount = Math.round(trip.driverEarnings * percentage);
-  const stageLabel = stage === 'loading_paid' ? 'Loading (90%)' : 'Delivery (10%)';
+  const pct = Math.round(percentage * 100);
+  const stageLabel = stage === 'loading_paid' ? `Loading (${pct}%)` : `Delivery (${pct}%)`;
 
   const tx = await walletService.credit(
     trip.driver,
@@ -140,7 +142,8 @@ exports.processLoadingPayout = async (tripId) => {
   // Transporter can settle the actual payment to TruxHire whenever they want.
 
   try {
-    const result = await processDriverPayout(trip, 0.9, 'loading_paid');
+    const loadingRate = await platformSettings.getLoadingSplitRate();
+    const result = await processDriverPayout(trip, loadingRate, 'loading_paid');
 
     await Trip.findByIdAndUpdate(tripId, {
       payoutStage: 'loading_paid',
@@ -150,9 +153,10 @@ exports.processLoadingPayout = async (tripId) => {
     });
 
     const driver = await User.findById(trip.driver);
+    const pct = Math.round(loadingRate * 100);
     await notificationService.sendNotification(trip.driver, {
       title: 'Wallet Credited! 💰',
-      body: `₹${result.amount.toLocaleString('en-IN')} (90%) added to your wallet. You can withdraw anytime.`,
+      body: `₹${result.amount.toLocaleString('en-IN')} (${pct}%) added to your wallet. You can withdraw anytime.`,
       type: 'payment',
       data: { tripId: trip._id.toString() },
       fcmToken: driver?.fcmToken,
@@ -177,7 +181,8 @@ exports.processDeliveryPayout = async (tripId) => {
   }
 
   try {
-    const result = await processDriverPayout(trip, 0.1, 'delivery_paid');
+    const deliveryRate = await platformSettings.getDeliverySplitRate();
+    const result = await processDriverPayout(trip, deliveryRate, 'delivery_paid');
 
     const update = {
       payoutStage: 'delivery_paid',
@@ -195,9 +200,10 @@ exports.processDeliveryPayout = async (tripId) => {
     await Trip.findByIdAndUpdate(tripId, update);
 
     const driver = await User.findById(trip.driver);
+    const deliveryPct = Math.round(deliveryRate * 100);
     await notificationService.sendNotification(trip.driver, {
       title: 'Wallet Credited! 🎉',
-      body: `₹${result.amount.toLocaleString('en-IN')} (10%) added to your wallet. Trip complete!`,
+      body: `₹${result.amount.toLocaleString('en-IN')} (${deliveryPct}%) added to your wallet. Trip complete!`,
       type: 'payment',
       data: { tripId: trip._id.toString() },
       fcmToken: driver?.fcmToken,

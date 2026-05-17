@@ -65,6 +65,8 @@ const tripSchema = new mongoose.Schema(
       phone: { type: String },
       designation: { type: String },
     },
+    // Set when admin directly assigns a driver (bypassing bid flow)
+    assignedByAdmin: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );

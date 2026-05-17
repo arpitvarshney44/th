@@ -325,6 +325,291 @@ router.delete('/staff/:id', superOnly, async (req, res, next) => {
 // ─── LOAD EDITING (trucker + super) ───────────────────────────────────────────
 const Load = require('../models/Load');
 
+// GET /admin/drivers-with-trucks?search= — for assign-driver modal
+router.get('/drivers-with-trucks', async (req, res, next) => {
+  try {
+    const User = require('../models/User');
+    const Truck = require('../models/Truck');
+    const Trip = require('../models/Trip');
+
+    const { search = '', page = 1, limit = 20 } = req.query;
+    const query = { role: { $in: ['driver', 'fleet_owner'] }, isBlocked: false };
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const drivers = await User.find(query)
+      .select('name phone rating totalTrips profileImage isAvailable verificationStatus')
+      .sort({ rating: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit));
+
+    const ACTIVE = ['accepted', 'started', 'in_transit', 'delivered'];
+    // Treat trips whose underlying load is cancelled as "free" — truck is available again.
+    const cancelledLoadIds = await Load.find({ status: 'cancelled' }).distinct('_id');
+
+    const result = await Promise.all(drivers.map(async (d) => {
+      const trucks = await Truck.find({ owner: d._id, verificationStatus: 'approved' })
+        .select('registrationNumber type capacity model year');
+
+      // For each truck, check if it's on an active trip
+      const trucksWithStatus = await Promise.all(trucks.map(async (t) => {
+        const activeTrip = await Trip.findOne({
+          truck: t._id,
+          status: { $in: ACTIVE },
+          load: { $nin: cancelledLoadIds },
+        })
+          .select('status load')
+          .populate('load', 'pickupLocation dropLocation');
+        return {
+          ...t.toObject(),
+          isOnTrip: !!activeTrip,
+          activeTrip: activeTrip ? {
+            status: activeTrip.status,
+            route: activeTrip.load
+              ? `${activeTrip.load.pickupLocation?.city} → ${activeTrip.load.dropLocation?.city}`
+              : null,
+          } : null,
+        };
+      }));
+
+      return { ...d.toObject(), trucks: trucksWithStatus };
+    }));
+
+    res.json({ success: true, data: result });
+  } catch (err) { next(err); }
+});
+
+// POST /admin/loads/:id/assign-driver — admin directly assigns a driver to a load
+router.post('/loads/:id/assign-driver', async (req, res, next) => {
+  try {
+    if (!['super', 'manager'].includes(req.user.adminLevel)) {
+      return res.status(403).json({ success: false, message: 'Not authorized.' });
+    }
+    const { driverId, truckId, agreedPrice } = req.body;
+    if (!driverId || !truckId || !agreedPrice) {
+      return res.status(400).json({ success: false, message: 'driverId, truckId and agreedPrice are required.' });
+    }
+
+    const User = require('../models/User');
+    const Truck = require('../models/Truck');
+    const Trip = require('../models/Trip');
+    const platformSettings = require('../services/platformSettings');
+
+    const load = await Load.findById(req.params.id);
+    if (!load) return res.status(404).json({ success: false, message: 'Load not found.' });
+    if (!['posted', 'bidding'].includes(load.status)) {
+      return res.status(400).json({ success: false, message: `Cannot assign driver — load is already ${load.status}.` });
+    }
+
+    const driver = await User.findOne({ _id: driverId, role: { $in: ['driver', 'fleet_owner'] } });
+    if (!driver) return res.status(404).json({ success: false, message: 'Driver not found.' });
+
+    const truck = await Truck.findOne({ _id: truckId, owner: driverId });
+    if (!truck) return res.status(404).json({ success: false, message: 'Truck not found or does not belong to this driver.' });
+
+    // Check truck is not already on an active trip (skip cancelled-load trips)
+    const ACTIVE = ['accepted', 'started', 'in_transit', 'delivered'];
+    const cancelledLoadIds = await Load.find({ status: 'cancelled' }).distinct('_id');
+    const truckBusy = await Trip.findOne({
+      truck: truckId,
+      status: { $in: ACTIVE },
+      load: { $nin: cancelledLoadIds },
+    });
+    if (truckBusy) {
+      return res.status(400).json({ success: false, message: 'This truck is currently on another active trip.' });
+    }
+
+    const split = await platformSettings.computeSplit(Number(agreedPrice));
+
+    const trip = await Trip.create({
+      load: load._id,
+      driver: driverId,
+      transporter: load.transporter,
+      truck: truckId,
+      agreedPrice: split.agreedPrice,
+      platformCommission: split.commission,
+      driverEarnings: split.driverEarnings,
+      assignedByAdmin: req.user._id,
+    });
+
+    await Promise.all([
+      Load.findByIdAndUpdate(load._id, {
+        status: 'assigned',
+        assignedDriver: driverId,
+        assignedTruck: truckId,
+      }),
+    ]);
+
+    const notificationService = require('../services/notificationService');
+    await notificationService.sendNotification(driverId, {
+      title: 'Load Assigned! 🚛',
+      body: `You have been assigned a load from ${load.pickupLocation.city} to ${load.dropLocation.city}.`,
+      type: 'trip',
+      data: { tripId: trip._id.toString() },
+      fcmToken: driver.fcmToken,
+    });
+
+    const populated = await Trip.findById(trip._id)
+      .populate('load', 'pickupLocation dropLocation loadType weight offeredPrice')
+      .populate('driver', 'name phone')
+      .populate('truck', 'registrationNumber type');
+
+    res.status(201).json({ success: true, data: populated });
+  } catch (err) { next(err); }
+});
+
+// POST /admin/loads — create a load on behalf of a transporter
+router.post('/loads', async (req, res, next) => {
+  try {
+    if (!['super', 'manager', 'trucker'].includes(req.user.adminLevel)) {
+      return res.status(403).json({ success: false, message: 'Not authorized.' });
+    }
+    const User = require('../models/User');
+    const {
+      transporterId, pickupLocation, dropLocation, loadType, weight,
+      truckTypeRequired, offeredPrice, pickupDate, pickupTime, description,
+    } = req.body;
+
+    if (!transporterId) {
+      return res.status(400).json({ success: false, message: 'transporterId is required.' });
+    }
+    const transporter = await User.findOne({ _id: transporterId, role: 'transporter' });
+    if (!transporter) {
+      return res.status(404).json({ success: false, message: 'Transporter not found.' });
+    }
+
+    const { getRoadDistance } = require('../services/distanceService');
+    const geocodeCity = async (city, state) => {
+      if (!city) return null;
+      try {
+        const query = `${city}, ${state || ''}`.trim();
+        const { data } = await require('axios').get('https://maps.googleapis.com/maps/api/geocode/json', {
+          params: { address: query, key: process.env.GOOGLE_MAPS_API_KEY },
+        });
+        const loc = data?.results?.[0]?.geometry?.location;
+        return loc ? { lat: loc.lat, lng: loc.lng } : null;
+      } catch { return null; }
+    };
+
+    let originLat = pickupLocation?.latitude || 0;
+    let originLng = pickupLocation?.longitude || 0;
+    let destLat = dropLocation?.latitude || 0;
+    let destLng = dropLocation?.longitude || 0;
+
+    if (originLat === 0 && originLng === 0) {
+      const geo = await geocodeCity(pickupLocation?.city, pickupLocation?.state);
+      if (geo) { originLat = geo.lat; originLng = geo.lng; }
+    }
+    if (destLat === 0 && destLng === 0) {
+      const geo = await geocodeCity(dropLocation?.city, dropLocation?.state);
+      if (geo) { destLat = geo.lat; destLng = geo.lng; }
+    }
+
+    const distance = await getRoadDistance(originLat, originLng, destLat, destLng);
+
+    const load = await Load.create({
+      transporter: transporterId,
+      pickupLocation: {
+        ...pickupLocation,
+        latitude: originLat, longitude: originLng,
+        coordinates: { type: 'Point', coordinates: [originLng, originLat] },
+      },
+      dropLocation: {
+        ...dropLocation,
+        latitude: destLat, longitude: destLng,
+        coordinates: { type: 'Point', coordinates: [destLng, destLat] },
+      },
+      loadType, weight, truckTypeRequired, offeredPrice, distance,
+      pickupDate, pickupTime, description: description || '',
+      status: 'posted',
+      postedByAdmin: req.user._id,
+    });
+
+    const populated = await Load.findById(load._id).populate('transporter', 'name companyName phone');
+    res.status(201).json({ success: true, data: populated });
+  } catch (err) { next(err); }
+});
+
+// PATCH /admin/loads/:id/cancel — admin cancel a load (any status except completed)
+router.patch('/loads/:id/cancel', async (req, res, next) => {
+  try {
+    if (!['super', 'manager'].includes(req.user.adminLevel)) {
+      return res.status(403).json({ success: false, message: 'Not authorized.' });
+    }
+    const { reason } = req.body;
+    const Bid = require('../models/Bid');
+    const Trip = require('../models/Trip');
+    const notificationService = require('../services/notificationService');
+    const User = require('../models/User');
+
+    const load = await Load.findById(req.params.id);
+    if (!load) return res.status(404).json({ success: false, message: 'Load not found.' });
+    if (['completed', 'cancelled'].includes(load.status)) {
+      return res.status(400).json({ success: false, message: `Load is already ${load.status}.` });
+    }
+
+    const cancelReason = reason || 'Cancelled by admin';
+
+    // 1. Mark load cancelled
+    await Load.findByIdAndUpdate(load._id, {
+      status: 'cancelled',
+      cancelReason,
+      cancelledBy: req.user._id,
+    });
+
+    // 2. Reject all pending bids
+    await Bid.updateMany({ load: load._id, status: 'pending' }, { status: 'rejected' });
+
+    // 3. Cascade-cancel any active trips on this load (admin's load cancel = full cancel)
+    const ACTIVE = ['accepted', 'started', 'in_transit', 'delivered'];
+    const activeTrips = await Trip.find({ load: load._id, status: { $in: ACTIVE } });
+    if (activeTrips.length > 0) {
+      await Trip.updateMany(
+        { load: load._id, status: { $in: ACTIVE } },
+        {
+          status: 'cancelled',
+          cancelReason,
+          cancelledBy: req.user._id,
+        },
+      );
+      // Notify driver(s) and transporter(s)
+      for (const t of activeTrips) {
+        try {
+          const driver = await User.findById(t.driver).select('fcmToken');
+          await notificationService.sendNotification(t.driver, {
+            title: 'Trip Cancelled',
+            body: `The load from ${load.pickupLocation?.city || ''} to ${load.dropLocation?.city || ''} was cancelled by admin.`,
+            type: 'trip',
+            data: { tripId: t._id.toString() },
+            fcmToken: driver?.fcmToken,
+          });
+        } catch (_) {}
+        try {
+          const transporter = await User.findById(t.transporter).select('fcmToken');
+          await notificationService.sendNotification(t.transporter, {
+            title: 'Load Cancelled',
+            body: `Your load from ${load.pickupLocation?.city || ''} to ${load.dropLocation?.city || ''} was cancelled by admin.`,
+            type: 'load',
+            data: { loadId: load._id.toString() },
+            fcmToken: transporter?.fcmToken,
+          });
+        } catch (_) {}
+      }
+    }
+
+    res.json({
+      success: true,
+      message: activeTrips.length > 0
+        ? `Load cancelled. ${activeTrips.length} active trip(s) also cancelled.`
+        : 'Load cancelled.',
+    });
+  } catch (err) { next(err); }
+});
+
 // PUT /admin/loads/:id — edit load details (not status)
 router.put('/loads/:id', async (req, res, next) => {
   try {

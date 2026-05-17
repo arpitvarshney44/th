@@ -3,6 +3,7 @@ const settingsController = require('../controllers/settingsController');
 const { protectAdmin } = require('../middleware/auth');
 
 // Public access for apps to get social links, etc.
+router.get('/public/payment-config', settingsController.getPaymentConfig);
 router.get('/', settingsController.getSettings);
 router.get('/:key', settingsController.getSetting);
 

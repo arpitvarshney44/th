@@ -217,11 +217,27 @@ exports.getAllLoads = async (req, res, next) => {
 exports.getAllTrips = async (req, res, next) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
-    const query = status ? { status } : {};
+    let query = {};
+
+    if (status === 'cancelled') {
+      // Include trips that are themselves cancelled OR whose load was cancelled by admin.
+      const cancelledLoadIds = await require('../models/Load')
+        .find({ status: 'cancelled' })
+        .distinct('_id');
+      query = {
+        $or: [
+          { status: 'cancelled' },
+          { load: { $in: cancelledLoadIds } },
+        ],
+      };
+    } else if (status) {
+      query = { status };
+    }
+
     const skip = (page - 1) * limit;
     const [trips, total] = await Promise.all([
       Trip.find(query)
-        .populate('load', 'pickupLocation dropLocation offeredPrice')
+        .populate('load', 'pickupLocation dropLocation offeredPrice status cancelReason')
         .populate('driver', 'name phone')
         .populate('transporter', 'name companyName phone')
         .sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
@@ -579,7 +595,7 @@ exports.getTripPayments = async (req, res, next) => {
 
     const [trips, total, capturedAgg, commissionAgg, awaitingCount, paidOutAgg] = await Promise.all([
       Trip.find(query)
-        .populate('load', 'pickupLocation dropLocation')
+        .populate('load', 'pickupLocation dropLocation status cancelReason')
         .populate('driver', 'name phone')
         .populate('transporter', 'name companyName phone')
         .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt loadingPayoutId deliveryPayoutId paymentOrderId paymentTransactionId status createdAt')
@@ -595,12 +611,26 @@ exports.getTripPayments = async (req, res, next) => {
         { $match: { ...query, payoutStage: { $in: ['loading_paid', 'delivery_paid'] } } },
         { $group: { _id: null, total: { $sum: '$platformCommission' }, count: { $sum: 1 } } },
       ]),
-      // Trips still awaiting transporter payment
-      Trip.countDocuments({
-        ...query,
-        paymentStatus: 'pending',
-        status: { $nin: ['cancelled', 'completed'] },
-      }),
+      // Trips still awaiting transporter payment (skip ones whose load was cancelled)
+      Trip.aggregate([
+        {
+          $lookup: {
+            from: 'loads',
+            localField: 'load',
+            foreignField: '_id',
+            as: 'loadDoc',
+          },
+        },
+        {
+          $match: {
+            ...query,
+            paymentStatus: 'pending',
+            status: { $nin: ['cancelled', 'completed'] },
+            'loadDoc.status': { $ne: 'cancelled' },
+          },
+        },
+        { $count: 'count' },
+      ]).then(r => r[0]?.count || 0),
       // Total paid out to drivers
       Trip.aggregate([
         { $match: { ...query } },

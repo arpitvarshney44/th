@@ -134,9 +134,12 @@ exports.getTripHistory = async (req, res, next) => {
 // GET /driver/trips/active
 exports.getActiveTrip = async (req, res, next) => {
   try {
+    const Load = require('../models/Load');
+    const cancelledLoadIds = await Load.find({ status: 'cancelled' }).distinct('_id');
     const trip = await Trip.findOne({
       driver: req.user._id,
       status: { $in: ['accepted', 'started', 'in_transit'] },
+      load: { $nin: cancelledLoadIds },
     })
       .populate('load')
       .populate('transporter', 'name companyName phone rating');
@@ -148,9 +151,12 @@ exports.getActiveTrip = async (req, res, next) => {
 // GET /driver/trips/active-list  — all currently ongoing trips for this driver
 exports.getActiveTrips = async (req, res, next) => {
   try {
+    const Load = require('../models/Load');
+    const cancelledLoadIds = await Load.find({ status: 'cancelled' }).distinct('_id');
     const trips = await Trip.find({
       driver: req.user._id,
       status: { $in: ['accepted', 'started', 'in_transit', 'delivered'] },
+      load: { $nin: cancelledLoadIds },
     })
       .populate('load')
       .populate('transporter', 'name companyName phone rating')

@@ -60,6 +60,7 @@ const loadSchema = new mongoose.Schema(
     assignedTruck: { type: mongoose.Schema.Types.ObjectId, ref: 'Truck' },
     cancelReason: { type: String },
     cancelledBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    postedByAdmin: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // set when admin creates on behalf of transporter
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );
