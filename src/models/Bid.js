@@ -19,4 +19,9 @@ const bidSchema = new mongoose.Schema(
 bidSchema.index({ load: 1, driver: 1 }, { unique: true });
 bidSchema.index({ load: 1, status: 1 });
 
+bidSchema.plugin(require('../services/realtime').plugin('bid', async (d) => {
+  const load = await mongoose.model('Load').findById(d.load).select('transporter');
+  return { rooms: [`user_${d.driver}`, load && `user_${load.transporter}`], extra: { loadId: String(d.load), status: d.status } };
+}));
+
 module.exports = mongoose.model('Bid', bidSchema);

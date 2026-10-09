@@ -2,13 +2,14 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const walletService = require('../services/walletService');
 const cashfreeService = require('../services/cashfreeService');
+const payoutService = require('../services/payoutService');
 const logger = require('../config/logger');
 
 // GET /wallet/balance
 exports.getBalance = async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id).select('walletBalance');
-    res.json({ success: true, data: { balance: user.walletBalance } });
+    res.json({ success: true, data: { balance: user.walletBalance || 0 } });
   } catch (err) { next(err); }
 };
 
@@ -160,69 +161,23 @@ exports.getTransporterPayments = async (req, res, next) => {
 };
 
 // ─── Cashfree Payouts Webhook ────────────────────────────────────────────────
-// Cashfree sends transfer status updates here. We use it to auto-flip
-// pending withdrawals to `completed` (or `failed`) without admin action.
-//
-// Typical event types: TRANSFER_SUCCESS, TRANSFER_FAILED, TRANSFER_REVERSED
+// The webhook body is NOT trusted for money movement: we only use it to learn
+// WHICH transfer changed, then re-query Cashfree for the real status
+// (payoutService.settleWithdrawal) before completing or refunding.
 exports.handlePayoutsWebhook = async (req, res) => {
   try {
     const event = req.body || {};
     const transfer = event?.data?.transfer || event?.transfer || event?.data || {};
     const transferId = transfer.transfer_id || transfer.transferId;
-    const status = (transfer.status || event.type || '').toUpperCase();
-    const utr = transfer.transfer_utr || transfer.utr || null;
-    const cfTransferId = transfer.cf_transfer_id || transfer.cfTransferId || null;
+    if (!transferId) return res.status(200).json({ ok: true, ignored: 'no transfer_id' });
 
-    if (!transferId) {
-      return res.status(200).json({ ok: true, ignored: 'no transfer_id' });
-    }
-
-    // Find the withdrawal whose metadata.transferId matches
-    const tx = await Transaction.findOne({
-      category: 'withdrawal',
-      'metadata.transferId': transferId,
-    });
+    const tx = await Transaction.findOne({ category: 'withdrawal', 'metadata.transferId': transferId });
     if (!tx) {
       logger.warn(`[Cashfree Payouts Webhook] No withdrawal tx found for transferId=${transferId}`);
       return res.status(200).json({ ok: true, ignored: 'tx not found' });
     }
-
-    // Map Cashfree status → our status
-    const SUCCESS = ['SUCCESS', 'COMPLETED', 'TRANSFER_SUCCESS'];
-    const FAILURE = ['FAILED', 'REVERSED', 'REJECTED', 'TRANSFER_FAILED', 'TRANSFER_REVERSED'];
-
-    if (SUCCESS.includes(status) && tx.status !== 'completed') {
-      await Transaction.findByIdAndUpdate(tx._id, {
-        status: 'completed',
-        referenceId: utr || cfTransferId || tx.referenceId,
-        metadata: { ...(tx.metadata || {}), webhookStatus: status, utr, cfTransferId, webhookAt: new Date() },
-      });
-      logger.info(`[Cashfree Payouts Webhook] ${transferId} → completed (UTR: ${utr || '—'})`);
-    } else if (FAILURE.includes(status) && tx.status !== 'failed' && tx.status !== 'completed') {
-      // Mark as failed and refund the wallet
-      const refundTx = await walletService.credit(
-        tx.user, tx.amount,
-        `Withdrawal refund - bank rejected by ${utr ? `UTR ${utr}` : 'provider'}`,
-        'refund',
-        null,
-        tx._id.toString(),
-      );
-      await Transaction.findByIdAndUpdate(tx._id, {
-        status: 'failed',
-        metadata: {
-          ...(tx.metadata || {}),
-          webhookStatus: status,
-          webhookAt: new Date(),
-          refundTxId: refundTx._id.toString(),
-          refundedAt: new Date(),
-        },
-      });
-      logger.info(`[Cashfree Payouts Webhook] ${transferId} → failed, refunded ₹${tx.amount}`);
-    } else {
-      // Intermediate status (e.g. PROCESSING) — just log
-      logger.info(`[Cashfree Payouts Webhook] ${transferId} status=${status} (no state change)`);
-    }
-
+    const result = await payoutService.settleWithdrawal(tx._id);
+    logger.info(`[Cashfree Payouts Webhook] ${transferId} → ${result.outcome} (${result.status || '-'})`);
     return res.status(200).json({ ok: true });
   } catch (err) {
     logger.error(`[Cashfree Payouts Webhook] ${err.message}`);

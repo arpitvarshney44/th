@@ -210,7 +210,9 @@ exports.getAllLoads = async (req, res, next) => {
       Load.find(query).populate('transporter', 'name companyName phone').sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
       Load.countDocuments(query),
     ]);
-    res.json({ success: true, data: { loads, total, page: Number(page) } });
+    const tripMap = await require('./loadController').tripInfoByLoad(loads.map((l) => l._id));
+    const withTrips = loads.map((l) => ({ ...l.toObject(), ...(tripMap.get(String(l._id)) || {}) }));
+    res.json({ success: true, data: { loads: withTrips, total, page: Number(page) } });
   } catch (err) { next(err); }
 };
 
@@ -302,6 +304,7 @@ exports.getTransactions = async (req, res, next) => {
 
 const cashfreeService = require('../services/cashfreeService');
 const walletService = require('../services/walletService');
+const payoutService = require('../services/payoutService');
 
 /**
  * GET /admin/withdrawals?status=pending|completed|failed&search=&userId=
@@ -399,6 +402,14 @@ exports.retryWithdrawal = async (req, res, next) => {
       return res.status(400).json({ success: false, message: `Cannot retry — already ${tx.status}.` });
     }
 
+    // Never create a second transfer while a previous one may still land
+    if (tx.metadata?.transferId) {
+      const prior = await payoutService.settleWithdrawal(tx._id);
+      if (prior.outcome === 'completed') return res.json({ success: true, message: 'Previous transfer already succeeded.' });
+      if (prior.outcome === 'refunded') return res.status(400).json({ success: false, message: 'Previous transfer failed and was refunded; wallet already restored.' });
+      if (prior.outcome === 'pending') return res.status(400).json({ success: false, message: `Previous transfer is still ${prior.status}; wait for it to settle.` });
+    }
+
     const user = tx.user;
     if (!user?.bankAccount?.accountNumber || !user?.bankAccount?.ifscCode) {
       return res.status(400).json({ success: false, message: 'User bank account is incomplete.' });
@@ -472,6 +483,9 @@ exports.markWithdrawalPaid = async (req, res, next) => {
     if (tx.status === 'completed') {
       return res.status(400).json({ success: false, message: 'Already completed.' });
     }
+    if (tx.status === 'failed') {
+      return res.status(400).json({ success: false, message: 'Withdrawal already failed and refunded to wallet.' });
+    }
 
     await Transaction.findByIdAndUpdate(tx._id, {
       status: 'completed',
@@ -504,38 +518,16 @@ exports.refreshWithdrawalStatus = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'No transferId on this withdrawal — nothing to refresh.' });
     }
 
-    const remote = await cashfreeService.getPayoutStatus(transferId);
-    if (!remote) {
-      return res.status(502).json({ success: false, message: 'Could not reach Cashfree.' });
+    const result = await payoutService.settleWithdrawal(tx._id);
+    if (result.outcome === 'unknown') {
+      return res.status(502).json({ success: false, message: result.reason || 'Could not reach Cashfree.' });
     }
-
-    const status = String(remote.status || remote.data?.status || '').toUpperCase();
-    const utr = remote.transfer_utr || remote.data?.transfer_utr || null;
-    const cfTransferId = remote.cf_transfer_id || remote.data?.cf_transfer_id || null;
-    const SUCCESS = ['SUCCESS', 'COMPLETED'];
-    const FAILURE = ['FAILED', 'REVERSED', 'REJECTED'];
-
-    if (SUCCESS.includes(status) && tx.status !== 'completed') {
-      await Transaction.findByIdAndUpdate(tx._id, {
-        status: 'completed',
-        referenceId: utr || cfTransferId || tx.referenceId,
-        metadata: { ...(tx.metadata || {}), refreshedStatus: status, utr, cfTransferId, refreshedAt: new Date() },
-      });
-      return res.json({ success: true, message: `Updated to completed${utr ? ` (UTR ${utr})` : ''}.`, data: { status, utr } });
-    }
-    if (FAILURE.includes(status) && tx.status !== 'failed') {
-      const refundTx = await walletService.credit(
-        tx.user, tx.amount,
-        'Withdrawal refund - bank rejected (status sync)',
-        'refund', null, tx._id.toString(),
-      );
-      await Transaction.findByIdAndUpdate(tx._id, {
-        status: 'failed',
-        metadata: { ...(tx.metadata || {}), refreshedStatus: status, refreshedAt: new Date(), refundTxId: refundTx._id.toString(), refundedAt: new Date() },
-      });
-      return res.json({ success: true, message: 'Updated to failed and refunded.', data: { status } });
-    }
-    return res.json({ success: true, message: `Still ${status || 'unknown'}.`, data: { status } });
+    const msg = {
+      completed: `Updated to completed${result.utr ? ` (UTR ${result.utr})` : ''}.`,
+      refunded: 'Updated to failed and refunded.',
+      pending: `Still ${result.status || 'processing'}.`,
+    }[result.outcome];
+    return res.json({ success: true, message: msg, data: { status: result.status, utr: result.utr } });
   } catch (err) { next(err); }
 };
 
@@ -559,27 +551,14 @@ exports.rejectWithdrawal = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Already rejected.' });
     }
 
-    // 1. Refund wallet first so we have the refund tx id
-    const refundTx = await walletService.credit(
-      tx.user, tx.amount,
+    const refundTx = await walletService.refundWithdrawal(
+      tx._id,
       `Withdrawal refund${reason ? ` - ${reason}` : ''}`,
-      'refund',
-      null,
-      tx._id.toString(),
+      { rejectedBy: req.user._id, rejectedAt: new Date(), rejectionReason: reason || 'Rejected by admin' },
     );
-
-    // 2. Mark original withdrawal failed and link refund
-    await Transaction.findByIdAndUpdate(tx._id, {
-      status: 'failed',
-      metadata: {
-        ...(tx.metadata || {}),
-        rejectedBy: req.user._id,
-        rejectedAt: new Date(),
-        rejectionReason: reason || 'Rejected by admin',
-        refundTxId: refundTx._id.toString(),
-        refundedAt: new Date(),
-      },
-    });
+    if (!refundTx) {
+      return res.status(400).json({ success: false, message: 'Withdrawal is no longer pending.' });
+    }
 
     return res.json({ success: true, message: 'Withdrawal rejected and amount refunded.' });
   } catch (err) { next(err); }

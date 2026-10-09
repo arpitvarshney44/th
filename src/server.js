@@ -28,6 +28,7 @@ const io = new Server(server, {
 });
 require('./socket')(io);
 app.set('io', io);
+require('./services/realtime').init(io);
 
 // Connect DB
 connectDB();
@@ -83,5 +84,17 @@ const PORT = process.env.PORT || 5001;
 server.listen(PORT, () => {
   logger.info(`🚀 TruxHire API running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
 });
+
+// Background reconciliation so a missed Cashfree webhook never leaves a payment
+// or withdrawal (and therefore the wallet ledger) out of sync.
+if (process.env.NODE_ENV !== 'test') {
+  const paymentService = require('./services/paymentService');
+  const payoutService = require('./services/payoutService');
+  const RECONCILE_MS = 2 * 60 * 1000;
+  setInterval(() => {
+    paymentService.syncPendingPayments().catch((e) => logger.warn(`[Reconcile] payments: ${e.message}`));
+    payoutService.settlePendingWithdrawals().catch((e) => logger.warn(`[Reconcile] payouts: ${e.message}`));
+  }, RECONCILE_MS).unref();
+}
 
 module.exports = { app, server };

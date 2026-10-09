@@ -9,6 +9,16 @@ const platformSettings = require('../services/platformSettings');
 const { getRoadDistance } = require('../services/distanceService');
 const axios = require('axios');
 
+// Latest live trip per load → { tripId, tripCode } so lists can show the Trip ID
+const tripInfoByLoad = async (loadIds) => {
+  const trips = await Trip.find({ load: { $in: loadIds }, status: { $ne: 'cancelled' } })
+    .select('_id load createdAt').sort({ createdAt: 1 });
+  const map = new Map();
+  trips.forEach((t) => map.set(String(t.load), { tripId: t._id, tripCode: t.tripCode }));
+  return map;
+};
+exports.tripInfoByLoad = tripInfoByLoad;
+
 // ─── DRIVER ENDPOINTS ─────────────────────────────────────────────────────────
 
 // GET /loads/nearby
@@ -308,12 +318,13 @@ exports.getMyLoads = async (req, res, next) => {
     ]);
 
     // Attach bids count
+    const tripMap = await tripInfoByLoad(loads.map((l) => l._id));
     const loadsWithBids = await Promise.all(
       loads.map(async (l) => {
         const bids = await Bid.find({ load: l._id, status: 'pending' })
           .populate('driver', 'name rating totalTrips phone')
           .populate('truck', 'registrationNumber type capacity');
-        return { ...l.toObject(), bids };
+        return { ...l.toObject(), bids, ...(tripMap.get(String(l._id)) || {}) };
       }),
     );
 
@@ -362,7 +373,14 @@ exports.acceptBid = async (req, res, next) => {
     await Promise.all([
       Bid.findByIdAndUpdate(bidId, { status: 'accepted' }),
       Bid.updateMany({ load: load._id, _id: { $ne: bidId }, status: 'pending' }, { status: 'rejected' }),
-      Load.findByIdAndUpdate(load._id, { status: 'assigned', assignedDriver: bid.driver._id, assignedTruck: bid.truck._id }),
+      // The accepted bid (counter-offer) becomes the load's price everywhere; keep the posted price in originalPrice
+      Load.findByIdAndUpdate(load._id, {
+        status: 'assigned',
+        assignedDriver: bid.driver._id,
+        assignedTruck: bid.truck._id,
+        offeredPrice: bid.amount,
+        originalPrice: load.originalPrice || load.offeredPrice,
+      }),
     ]);
 
     await notificationService.sendNotification(bid.driver._id, {

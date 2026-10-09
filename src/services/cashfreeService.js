@@ -70,8 +70,9 @@ exports.createOrder = async (amount, orderId, customer, notes = {}) => {
 exports.verifyPayment = async (orderId) => {
   try {
     const { data } = await axios.get(`${PG_BASE_URL}/orders/${orderId}/payments`, { headers: pgHeaders() });
-    // data is an array of payments
-    const payment = Array.isArray(data) && data.length > 0 ? data[0] : null;
+    // data is an array of payments — prefer a successful one if several attempts exist
+    const list = Array.isArray(data) ? data : [];
+    const payment = list.find((p) => p.payment_status === 'SUCCESS') || list[0] || null;
     if (!payment) return { status: 'PENDING' };
     return {
       status: payment.payment_status, // SUCCESS, FAILED, PENDING, USER_DROPPED
@@ -86,6 +87,66 @@ exports.verifyPayment = async (orderId) => {
     const msg = err.response?.data?.message || err.message;
     logger.error(`[Cashfree] Verify payment failed: ${msg}`);
     throw new Error(msg);
+  }
+};
+
+/**
+ * Create a hosted payment link (customer pays from any browser / UPI app).
+ * Cashfree itself SMS/emails the link to the customer.
+ * @param {object} p - { linkId, amount, purpose, customer: {name,email,phone}, expiryDays }
+ */
+exports.createPaymentLink = async ({ linkId, amount, purpose, customer, expiryDays = 7 }) => {
+  try {
+    const phone = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+    const payload = {
+      link_id: linkId,
+      link_amount: Math.round(amount * 100) / 100,
+      link_currency: 'INR',
+      link_purpose: String(purpose || 'TruxHire shipment payment').slice(0, 500),
+      customer_details: {
+        customer_name: customer.name || 'Customer',
+        customer_phone: phone,
+        ...(customer.email ? { customer_email: customer.email } : {}),
+      },
+      link_notify: { send_sms: !!phone, send_email: !!customer.email },
+      link_auto_reminders: true,
+      link_expiry_time: new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000).toISOString(),
+      link_meta: {
+        notify_url: `${process.env.SERVER_URL || 'https://server.truxhire.tech'}/api/v1/payments/webhook`,
+      },
+    };
+    const { data } = await axios.post(`${PG_BASE_URL}/links`, payload, { headers: pgHeaders() });
+    logger.info(`[Cashfree] Payment link created: ${data.link_id}`);
+    return { linkId: data.link_id, url: data.link_url, status: data.link_status, raw: data };
+  } catch (err) {
+    const msg = err.response?.data?.message || err.message;
+    logger.error(`[Cashfree] Create payment link failed: ${msg}`);
+    throw new Error(msg);
+  }
+};
+
+/** Fetch a payment link (status: ACTIVE | PAID | PARTIALLY_PAID | EXPIRED | CANCELLED) */
+exports.getPaymentLink = async (linkId) => {
+  try {
+    const { data } = await axios.get(`${PG_BASE_URL}/links/${encodeURIComponent(linkId)}`, { headers: pgHeaders() });
+    return data;
+  } catch (err) {
+    logger.error(`[Cashfree] Get payment link failed: ${err.response?.data?.message || err.message}`);
+    return null;
+  }
+};
+
+/** Successful payments made against a payment link */
+exports.getPaymentLinkPayments = async (linkId) => {
+  try {
+    const { data } = await axios.get(`${PG_BASE_URL}/links/${encodeURIComponent(linkId)}/orders`, {
+      headers: pgHeaders(),
+    });
+    // Cashfree only accepts status=ALL|ACTIVE here, so filter PAID ourselves
+    return (Array.isArray(data) ? data : []).filter((o) => o.order_status === 'PAID');
+  } catch (err) {
+    logger.error(`[Cashfree] Link orders failed: ${err.response?.data?.message || err.message}`);
+    return [];
   }
 };
 
@@ -232,4 +293,15 @@ exports.getPayoutStatus = async (transferId) => {
     logger.error(`[Cashfree Payouts] Status check failed: ${err.message}`);
     return null;
   }
+};
+
+/**
+ * Normalise a Cashfree payout status into 'success' | 'failed' | 'pending' | null (unknown).
+ */
+exports.classifyPayoutStatus = (status) => {
+  const st = String(status || '').toUpperCase();
+  if (['SUCCESS', 'COMPLETED', 'TRANSFER_SUCCESS'].includes(st)) return 'success';
+  if (['FAILED', 'REVERSED', 'REJECTED', 'CANCELLED', 'TRANSFER_FAILED', 'TRANSFER_REVERSED', 'TRANSFER_REJECTED'].includes(st)) return 'failed';
+  if (['RECEIVED', 'PENDING', 'PROCESSING', 'APPROVAL_PENDING', 'INITIATED', 'SENT_TO_BENEFICIARY', 'ON_HOLD'].includes(st)) return 'pending';
+  return null;
 };

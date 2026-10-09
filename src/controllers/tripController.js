@@ -6,7 +6,14 @@ const walletService = require('../services/walletService');
 const platformSettings = require('../services/platformSettings');
 const notificationService = require('../services/notificationService');
 const paymentController = require('./paymentController');
+const paymentService = require('../services/paymentService');
 const logger = require('../config/logger');
+
+// Fire-and-forget: a failed link must never block the loading/approval flow.
+// The transporter can always re-request it (POST /payments/trip/:id/payment-link).
+const sendPaymentLinkSafe = (tripId) =>
+  paymentService.sendPaymentLink(tripId).catch((err) =>
+    logger.error(`[PaymentLink] Trip ${tripId} link failed: ${err.message}`));
 
 // ─── DRIVER: Start trip (just marks started, no payout yet) ──────────────────
 // PATCH /trips/:id/start
@@ -78,6 +85,9 @@ exports.uploadLoadingProof = async (req, res, next) => {
       fcmToken: transporter?.fcmToken,
     });
 
+    // Loading is complete → send the customer (transporter) their payment link
+    await sendPaymentLinkSafe(trip._id);
+
     res.json({ success: true, message: 'Loading proof uploaded. Awaiting transporter approval.' });
   } catch (err) { next(err); }
 };
@@ -115,6 +125,9 @@ exports.approveLoading = async (req, res, next) => {
       data: { tripId: trip._id.toString() },
       fcmToken: driver?.fcmToken,
     });
+
+    // Safety net: make sure an unpaid trip has a payment link out by now
+    if (trip.paymentStatus === 'pending' && !trip.paymentLinkUrl) await sendPaymentLinkSafe(trip._id);
 
     res.json({ success: true, message: `Loading approved. ${loadingPct}% payout initiated.` });
   } catch (err) { next(err); }
@@ -348,7 +361,8 @@ exports.getLoadingMemo = async (req, res, next) => {
     const { load, driver, truck } = trip;
     const transporter = await User.findById(trip.transporter);
 
-    const offeredPrice = load?.offeredPrice || 0;
+    // Final agreed amount (accepted bid / counter-offer), not the originally posted price
+    const offeredPrice = trip.agreedPrice || load?.offeredPrice || 0;
     const loadingRate = await platformSettings.getLoadingSplitRate();
     const advance = Math.round(offeredPrice * loadingRate);
     const balance = offeredPrice - advance;
@@ -381,7 +395,7 @@ exports.getLoadingMemo = async (req, res, next) => {
     <html lang="en">
     <head>
       <meta charset="UTF-8">
-      <title>Loading Memo - ${trip._id}</title>
+      <title>Loading Memo - ${trip.tripCode}</title>
       <style>
         body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; line-height: 1.4; padding: 30px; margin: 0; background-color: #FAFAFA; }
         .memo-container { max-width: 800px; margin: 0 auto; background: #FFF; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
@@ -459,7 +473,7 @@ exports.getLoadingMemo = async (req, res, next) => {
 
         <table class="meta-table">
           <tr>
-            <td>Trip No: ${trip._id.toString().toUpperCase()}</td>
+            <td>Trip ID: ${trip.tripCode} <span style="font-weight:normal;color:#777;font-size:11px;">(${trip._id.toString().toUpperCase()})</span></td>
             <td style="text-align: right;">Date: ${new Date(trip.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
           </tr>
         </table>

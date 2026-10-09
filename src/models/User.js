@@ -100,4 +100,9 @@ userSchema.methods.toPublicJSON = function () {
   return obj;
 };
 
+userSchema.plugin(require('../services/realtime').plugin('user', async (d) => ({
+  rooms: [`user_${d._id}`],
+  extra: { verificationStatus: d.verificationStatus, walletBalance: d.walletBalance },
+})));
+
 module.exports = mongoose.model('User', userSchema);

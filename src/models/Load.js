@@ -46,7 +46,8 @@ const loadSchema = new mongoose.Schema(
       ],
       required: true,
     },
-    offeredPrice: { type: Number, required: true },
+    offeredPrice: { type: Number, required: true }, // becomes the agreed price once a bid/counter-offer is accepted
+    originalPrice: { type: Number }, // transporter's first posted price (kept when a counter offer is accepted)
     distance: { type: Number, default: 0 }, // km
     pickupDate: { type: String, required: true },
     pickupTime: { type: String, required: true },
@@ -69,5 +70,11 @@ loadSchema.index({ 'pickupLocation.coordinates': '2dsphere' });
 loadSchema.index({ transporter: 1 });
 loadSchema.index({ status: 1 });
 loadSchema.index({ createdAt: -1 });
+
+loadSchema.plugin(require('../services/realtime').plugin('load', async (d) => ({
+  // role_driver: open-load lists change whenever any load is posted / bid on / assigned / cancelled
+  rooms: [`user_${d.transporter}`, d.assignedDriver && `user_${d.assignedDriver}`, 'role_driver'],
+  extra: { status: d.status },
+})));
 
 module.exports = mongoose.model('Load', loadSchema);

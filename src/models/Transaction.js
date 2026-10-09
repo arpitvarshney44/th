@@ -24,5 +24,15 @@ const transactionSchema = new mongoose.Schema(
 transactionSchema.index({ user: 1, createdAt: -1 });
 transactionSchema.index({ trip: 1 });
 transactionSchema.index({ status: 1 });
+// Idempotency: a given gateway payment can only be ledgered once per category
+transactionSchema.index(
+  { category: 1, referenceId: 1, type: 1 },
+  { unique: true, partialFilterExpression: { category: 'trip_payment', referenceId: { $type: 'string' } } },
+);
+
+transactionSchema.plugin(require('../services/realtime').plugin('wallet', async (d) => ({
+  rooms: [`user_${d.user}`],
+  extra: { status: d.status, category: d.category },
+})));
 
 module.exports = mongoose.model('Transaction', transactionSchema);

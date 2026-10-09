@@ -30,4 +30,9 @@ notificationSchema.index({ user: 1, isRead: 1 });
 notificationSchema.index({ createdAt: -1 });
 notificationSchema.index({ broadcastId: 1 });
 
+notificationSchema.plugin(require('../services/realtime').plugin('notification', async (d) => ({
+  rooms: [`user_${d.user}`],
+  extra: { type: d.type },
+})));
+
 module.exports = mongoose.model('Notification', notificationSchema);

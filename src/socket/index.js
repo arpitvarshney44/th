@@ -8,7 +8,9 @@ module.exports = (io) => {
     try {
       const token = socket.handshake.auth?.token;
       if (!token) return next(new Error('Authentication required'));
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      let decoded;
+      try { decoded = jwt.verify(token, process.env.JWT_SECRET); }
+      catch { decoded = jwt.verify(token, process.env.JWT_ADMIN_SECRET || process.env.JWT_SECRET); }
       const user = await User.findById(decoded.id).select('-password');
       if (!user || user.isBlocked) return next(new Error('Unauthorized'));
       socket.user = user;
@@ -24,6 +26,8 @@ module.exports = (io) => {
 
     // Join personal room
     socket.join(`user_${userId}`);
+    socket.join(`role_${socket.user.role === 'fleet_owner' ? 'driver' : socket.user.role}`);
+    if (socket.user.role === 'admin') socket.join('admins');
 
     // Join trip room for live tracking
     socket.on('join_trip', (tripId) => {

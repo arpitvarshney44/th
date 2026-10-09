@@ -2,6 +2,7 @@ const Trip = require('../models/Trip');
 const User = require('../models/User');
 const cashfreeService = require('../services/cashfreeService');
 const walletService = require('../services/walletService');
+const paymentService = require('../services/paymentService');
 const platformSettings = require('../services/platformSettings');
 const notificationService = require('../services/notificationService');
 const logger = require('../config/logger');
@@ -16,7 +17,7 @@ exports.createOrder = async (req, res, next) => {
       .populate('load')
       .populate('transporter', 'name phone email companyName');
     if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
-    if (trip.paymentStatus !== 'pending') {
+    if (!['pending', 'failed'].includes(trip.paymentStatus)) {
       return res.status(400).json({ success: false, message: 'Payment already processed.' });
     }
 
@@ -61,47 +62,49 @@ exports.verifyPayment = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'orderId and tripId are required.' });
     }
 
-    // Fetch payment status from Cashfree
+    // Only the transporter that owns the trip, and only for the order we created for it
+    const trip = await Trip.findOne({ _id: tripId, transporter: req.user._id });
+    if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
+    if (trip.paymentOrderId !== orderId) {
+      return res.status(400).json({ success: false, message: 'Order does not belong to this trip.' });
+    }
+
+    // Always trust Cashfree, never the client
     const payment = await cashfreeService.verifyPayment(orderId);
     if (payment.status !== 'SUCCESS') {
       return res.status(400).json({ success: false, message: `Payment ${payment.status?.toLowerCase()}.` });
     }
+    if (Number(payment.amount) < Number(trip.agreedPrice)) {
+      return res.status(400).json({ success: false, message: 'Paid amount does not match the shipment amount.' });
+    }
 
-    const trip = await Trip.findById(tripId).populate('load').populate('driver');
-    if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
-
-    // Update trip with payment info
-    await Trip.findByIdAndUpdate(trip._id, {
-      paymentOrderId: orderId,
-      paymentTransactionId: payment.paymentId,
-      paymentStatus: 'captured',
-    });
-
-    // Record as transporter transaction
-    const Transaction = require('../models/Transaction');
-    await Transaction.create({
-      user: trip.transporter,
-      type: 'debit',
-      amount: trip.agreedPrice,
-      description: `Payment for shipment - ${trip.load.pickupLocation.city} to ${trip.load.dropLocation.city}`,
-      category: 'trip_payment',
-      status: 'completed',
-      trip: trip._id,
-      referenceId: payment.paymentId,
-      balanceBefore: 0,
-      balanceAfter: 0,
-    }).catch(() => {});
-
-    // Notify driver
-    await notificationService.sendNotification(trip.driver._id, {
-      title: 'Payment Received! 💰',
-      body: `₹${trip.agreedPrice.toLocaleString('en-IN')} payment confirmed for your trip.`,
-      type: 'payment',
-      data: { tripId: trip._id.toString() },
-      fcmToken: trip.driver.fcmToken,
+    await paymentService.captureTripPayment(trip._id, {
+      paymentId: payment.paymentId, orderId, amount: payment.amount, source: 'verify_api',
     });
 
     res.json({ success: true, message: 'Payment verified successfully.', data: { paymentId: payment.paymentId } });
+  } catch (err) { next(err); }
+};
+
+// POST /payments/trip/:tripId/payment-link  (transporter: get / resend the link)
+exports.getPaymentLink = async (req, res, next) => {
+  try {
+    const trip = await Trip.findOne({ _id: req.params.tripId, transporter: req.user._id });
+    if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
+    const result = await paymentService.sendPaymentLink(trip._id);
+    if (result.skipped) return res.json({ success: true, message: 'Payment already completed.', data: { paid: true } });
+    res.json({ success: true, data: { url: result.url, linkId: result.linkId } });
+  } catch (err) { next(err); }
+};
+
+// POST /payments/trip/:tripId/sync  (transporter: "I paid, refresh")
+exports.syncPayment = async (req, res, next) => {
+  try {
+    const trip = await Trip.findOne({ _id: req.params.tripId, transporter: req.user._id });
+    if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
+    await paymentService.syncTripPayment(trip._id);
+    const fresh = await Trip.findById(trip._id).select('paymentStatus');
+    res.json({ success: true, data: { paymentStatus: fresh.paymentStatus } });
   } catch (err) { next(err); }
 };
 
@@ -223,7 +226,7 @@ exports.getTripPaymentDetails = async (req, res, next) => {
   try {
     const trip = await Trip.findById(req.params.tripId)
       .populate('load', 'pickupLocation dropLocation')
-      .select('agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt paymentTransactionId paymentOrderId');
+      .select('tripCode paymentLinkUrl agreedPrice platformCommission driverEarnings paymentStatus payoutStage loadingPayoutAmount deliveryPayoutAmount loadingPayoutAt deliveryPayoutAt paymentTransactionId paymentOrderId');
 
     if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
 
@@ -255,22 +258,29 @@ exports.handleWebhook = async (req, res) => {
       const order = data?.order;
       if (!order?.order_id) return res.status(200).json({ ok: true });
 
-      const trip = await Trip.findOne({ paymentOrderId: order.order_id });
-      if (trip && trip.paymentStatus === 'pending') {
-        await Trip.findByIdAndUpdate(trip._id, {
-          paymentStatus: 'captured',
-          paymentTransactionId: payment?.cf_payment_id?.toString(),
+      // Match in-app orders by order id, payment-link orders by link id
+      const linkId = data?.link_id || order?.order_tags?.link_id || order?.link_id;
+      const trip = await Trip.findOne({
+        $or: [{ paymentOrderId: order.order_id }, ...(linkId ? [{ paymentLinkId: linkId }] : [])],
+      });
+      if (trip) {
+        await paymentService.captureTripPayment(trip._id, {
+          paymentId: payment?.cf_payment_id, orderId: order.order_id,
+          amount: payment?.payment_amount, source: 'webhook',
         });
-        logger.info(`Webhook: Payment captured for trip ${trip._id}`);
       }
+    } else if (type === 'PAYMENT_LINK_EVENT' || type === 'PAYMENT_LINK_PAID_WEBHOOK') {
+      const linkId = data?.link_id;
+      const trip = linkId && await Trip.findOne({ paymentLinkId: linkId });
+      if (trip) await paymentService.syncTripPayment(trip._id);
     } else if (type === 'PAYMENT_FAILED_WEBHOOK') {
       const order = data?.order;
       if (!order?.order_id) return res.status(200).json({ ok: true });
-      const trip = await Trip.findOne({ paymentOrderId: order.order_id });
-      if (trip) {
-        await Trip.findByIdAndUpdate(trip._id, { paymentStatus: 'failed' });
-        logger.info(`Webhook: Payment failed for trip ${trip._id}`);
-      }
+      // Only flag failed while still pending — never downgrade a captured payment
+      await Trip.findOneAndUpdate(
+        { paymentOrderId: order.order_id, paymentStatus: 'pending' },
+        { paymentStatus: 'failed' },
+      );
     }
 
     res.status(200).json({ ok: true });

@@ -42,6 +42,10 @@ const tripSchema = new mongoose.Schema(
     paymentOrderId: { type: String },        // Cashfree order_id
     paymentTransactionId: { type: String },  // Cashfree cf_payment_id / payment_id
     paymentSignature: { type: String },
+    // Cashfree payment link sent to the transporter once loading is complete
+    paymentLinkId: { type: String },
+    paymentLinkUrl: { type: String },
+    paymentLinkSentAt: { type: Date },
 
     // Payout tracking
     payoutStage: {
@@ -71,9 +75,19 @@ const tripSchema = new mongoose.Schema(
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } },
 );
 
+// Human-readable trip id shown in admin panel and both apps (e.g. TRX-1A2B3C4D)
+tripSchema.virtual('tripCode').get(function () {
+  return this._id ? `TRX-${this._id.toString().slice(-8).toUpperCase()}` : undefined;
+});
+
 tripSchema.index({ driver: 1, status: 1 });
 tripSchema.index({ transporter: 1, status: 1 });
 tripSchema.index({ load: 1 });
 tripSchema.index({ currentLocation: '2dsphere' });
+
+tripSchema.plugin(require('../services/realtime').plugin('trip', async (d) => ({
+  rooms: [`user_${d.driver}`, `user_${d.transporter}`],
+  extra: { tripId: String(d._id), status: d.status, paymentStatus: d.paymentStatus, payoutStage: d.payoutStage },
+})));
 
 module.exports = mongoose.model('Trip', tripSchema);

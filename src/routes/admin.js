@@ -50,6 +50,15 @@ router.get('/trips/:id', async (req, res, next) => {
 router.get('/transactions', ctrl.getTransactions);
 router.get('/trip-payments', ctrl.getTripPayments);
 
+// Wallet vs ledger audit (super admin) — lists users whose walletBalance differs from their ledger
+router.get('/wallet-reconcile', async (req, res, next) => {
+  try {
+    if (req.user.adminLevel !== 'super') return res.status(403).json({ success: false, message: 'Not authorized.' });
+    const data = await require('../services/walletService').reconcile(req.query.userId || null);
+    res.json({ success: true, data });
+  } catch (err) { next(err); }
+});
+
 // Withdrawals
 router.get('/withdrawals', ctrl.getWithdrawals);
 router.post('/withdrawals/:id/retry', ctrl.retryWithdrawal);
@@ -441,6 +450,8 @@ router.post('/loads/:id/assign-driver', async (req, res, next) => {
         status: 'assigned',
         assignedDriver: driverId,
         assignedTruck: truckId,
+        offeredPrice: split.agreedPrice,
+        originalPrice: load.originalPrice || load.offeredPrice,
       }),
     ]);
 
