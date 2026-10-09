@@ -127,7 +127,7 @@ exports.approveLoading = async (req, res, next) => {
     });
 
     // Safety net: make sure an unpaid trip has a payment link out by now
-    if (trip.paymentStatus === 'pending' && !trip.paymentLinkUrl) await sendPaymentLinkSafe(trip._id);
+    if (trip.paymentStatus === 'pending' && !trip.paymentLinkSentAt) await sendPaymentLinkSafe(trip._id);
 
     res.json({ success: true, message: `Loading approved. ${loadingPct}% payout initiated.` });
   } catch (err) { next(err); }

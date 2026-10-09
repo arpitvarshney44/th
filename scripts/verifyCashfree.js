@@ -53,7 +53,13 @@ const payoutArg = process.argv.find((a) => a.startsWith('--payout='));
     }, { headers: pgH });
     ok(!!data.link_url, `Payment Links OK — ${data.link_url}`);
     await axios.post(`${PG}/links/${linkId}/cancel`, {}, { headers: pgH }).then(() => info('(test link cancelled)')).catch(() => {});
-  } catch (e) { ok(false, `Payment link failed: ${e.response?.data?.message || e.message}`); }
+  } catch (e) {
+    const msg = e.response?.data?.message || e.message;
+    if (/not enabled|not approved/i.test(msg)) {
+      console.log('⚠️  WARN  Cashfree Payment Links API not enabled on this account — the app automatically uses its own hosted pay page (/pay/…) instead.');
+      info('Optional: ask care@cashfree.com to enable "link_creation_api" to also get Cashfree SMS/email links.');
+    } else ok(false, `Payment link failed: ${msg}`);
+  }
 
   // 4. Payouts auth + IP whitelist (read-only probe)
   try {

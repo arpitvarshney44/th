@@ -55,6 +55,9 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
   }
 }));
 
+// Hosted payment page (public, signed token)
+app.use('/pay', require('./routes/pay'));
+
 // API Routes
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/driver', driverRoutes);

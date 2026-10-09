@@ -50,8 +50,9 @@ exports.createOrder = async (amount, orderId, customer, notes = {}) => {
       order_note: notes.note || `Payment for trip ${notes.tripId || ''}`,
       order_meta: {
         notify_url: `${process.env.SERVER_URL || 'https://server.truxhire.tech'}/api/v1/payments/webhook`,
+        ...(notes.returnUrl ? { return_url: notes.returnUrl } : {}),
       },
-      order_tags: notes,
+      order_tags: Object.fromEntries(Object.entries(notes).filter(([k]) => k !== 'returnUrl')),
     };
 
     const { data } = await axios.post(`${PG_BASE_URL}/orders`, payload, { headers: pgHeaders() });
@@ -61,6 +62,17 @@ exports.createOrder = async (amount, orderId, customer, notes = {}) => {
     const msg = err.response?.data?.message || err.message;
     logger.error(`[Cashfree] Create order failed: ${msg}`);
     throw new Error(msg);
+  }
+};
+
+/** Fetch an order (order_status: ACTIVE | PAID | EXPIRED | TERMINATED …) */
+exports.getOrder = async (orderId) => {
+  try {
+    const { data } = await axios.get(`${PG_BASE_URL}/orders/${encodeURIComponent(orderId)}`, { headers: pgHeaders() });
+    return data;
+  } catch (err) {
+    logger.error(`[Cashfree] Get order failed: ${err.response?.data?.message || err.message}`);
+    return null;
   }
 };
 

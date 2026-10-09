@@ -47,3 +47,26 @@ exports.sendOTPEmail = async (email, otp) => {
     return false;
   }
 };
+
+exports.sendPaymentLinkEmail = async (email, { amount, tripCode, url }) => {
+  if (!email || !process.env.SMTP_USER || process.env.SMTP_USER === 'your@gmail.com') return false;
+  try {
+    await getTransporter().sendMail({
+      from: `"TruxHire" <${process.env.SMTP_USER}>`,
+      to: email,
+      subject: `TruxHire - Payment link for shipment ${tripCode}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:30px;border:1px solid #eee;border-radius:12px;">
+          <h2 style="color:#E53935;text-align:center;">TRUXHIRE</h2>
+          <p>Loading is complete for shipment <b>${tripCode}</b>.</p>
+          <p>Please pay <b>₹${Number(amount).toLocaleString('en-IN')}</b> using the secure link below (UPI / Card / NetBanking):</p>
+          <p style="text-align:center;margin:28px 0;"><a href="${url}" style="background:#E53935;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">PAY NOW</a></p>
+          <p style="color:#888;font-size:12px;">If the button does not work, open: ${url}</p>
+        </div>`,
+    });
+    return true;
+  } catch (err) {
+    logger.error(`Payment link email failed: ${err.message}`);
+    return false;
+  }
+};

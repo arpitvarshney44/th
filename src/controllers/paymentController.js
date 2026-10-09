@@ -93,6 +93,7 @@ exports.getPaymentLink = async (req, res, next) => {
     if (!trip) return res.status(404).json({ success: false, message: 'Trip not found.' });
     const result = await paymentService.sendPaymentLink(trip._id);
     if (result.skipped) return res.json({ success: true, message: 'Payment already completed.', data: { paid: true } });
+    if (result.inApp) return res.json({ success: true, message: 'Use the PAY button in the app.', data: { inApp: true } });
     res.json({ success: true, data: { url: result.url, linkId: result.linkId } });
   } catch (err) { next(err); }
 };
